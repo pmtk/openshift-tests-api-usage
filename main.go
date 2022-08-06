@@ -1,3 +1,23 @@
+/*
+assumptions:
+- many `var _ = g.Describe` possible in single file
+- nested `Describe`s with 1 It are possible, but only top Describe is taken into consideration
+- free functions can create oc.CLI (rather just being given via args)
+
+structure:
+- pkg
+  - file
+    - free functions
+	  `var _ = g.Describe`s (can call free functions)
+
+how to keep track of such?
+  clusterAdminClientConfig := oc.AdminConfig()
+  clusterAdminOAuthClient := oauthv1client.NewForConfigOrDie(clusterAdminClientConfig)
+
+maybe AST needs to be transformed...?
+g.Before() also can initiate CLI (but not create - needs to be in outer scope)
+*/
+
 package main
 
 import (
