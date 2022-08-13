@@ -155,8 +155,6 @@ func getCallExprArgs(ce *ast.CallExpr, count int) string {
 }
 
 func buildHelpers(path string, f *ast.File, p *packages.Package) Node {
-	klog.Infof("Building helpers from %s\n", path)
-
 	rn := NewRootNode()
 	currentNode := rn
 
@@ -186,7 +184,6 @@ func buildHelpers(path string, f *ast.File, p *packages.Package) Node {
 								if se, ok := ce.Fun.(*ast.SelectorExpr); ok {
 									if varName == "_" && se.Sel.Name == "Describe" {
 										// don't go into Ginkgo tests
-										klog.Infof("Found Describe while building helpers\n")
 										return false
 									}
 								}
