@@ -230,9 +230,7 @@ func buildHelpers(path string, f *ast.File, p *packages.Package) Node {
 	return rn
 }
 
-func handleFile(path string, f *ast.File, p *packages.Package) error {
-	klog.Infof("Inspecting file %s\n", path)
-
+func buildTestsTree(path string, f *ast.File, p *packages.Package) Node {
 	rn := NewRootNode()
 	currentNode := rn
 	inspector := inspector.New([]*ast.File{f})
@@ -283,8 +281,18 @@ func handleFile(path string, f *ast.File, p *packages.Package) error {
 			return
 		})
 
+	return rn
+}
+
+func handleFile(path string, f *ast.File, p *packages.Package) error {
+	klog.Infof("Inspecting file %s\n", path)
+
+	tests := buildTestsTree(path, f, p)
 	helpers := buildHelpers(path, f, p)
-	printTree(rn)
+
+	if tests != nil {
+		printTree(tests)
+	}
 	if helpers != nil {
 		printTree(helpers)
 	}
