@@ -18,6 +18,14 @@ import (
 	"golang.org/x/tools/go/types/typeutil"
 )
 
+/*
+TODO:
+- Merge test and helper trees: any helper node should be changed to list of API calls
+- Transform API nodes into specific k8s/ocp API packages
+- Export a summary: Ginkgo nodes + API used
+- Run for whole origin repo
+*/
+
 func main() {
 	klog.InitFlags(nil)
 	flag.Parse()
