@@ -1,199 +1,322 @@
-/*
-assumptions:
-- many `var _ = g.Describe` possible in single file
-- nested `Describe`s with 1 It are possible, but only top Describe is taken into consideration
-- free functions can create oc.CLI (rather just being given via args)
-
-structure:
-- pkg
-  - file
-    - free functions
-	  `var _ = g.Describe`s (can call free functions)
-
-how to keep track of such?
-  clusterAdminClientConfig := oc.AdminConfig()
-  clusterAdminOAuthClient := oauthv1client.NewForConfigOrDie(clusterAdminClientConfig)
-
-maybe AST needs to be transformed...?
-g.Before() also can initiate CLI (but not create - needs to be in outer scope)
-*/
-
 package main
 
 import (
 	"bytes"
+	"flag"
+	"fmt"
 	"go/ast"
 	"go/printer"
 	"go/token"
-	"log"
-	"path"
-	"reflect"
-	"runtime"
+	"go/types"
 	"strings"
 
-	p "golang.org/x/tools/go/packages"
+	"github.com/davecgh/go-spew/spew"
+	klog "k8s.io/klog/v2"
+
+	"golang.org/x/tools/go/ast/inspector"
+	"golang.org/x/tools/go/packages"
+	"golang.org/x/tools/go/types/typeutil"
 )
 
-// TODO: test Dir: origin + patterns "."
-
 func main() {
-	cfg := &p.Config{
-		Mode: p.NeedFiles | p.NeedSyntax | p.NeedCompiledGoFiles,
-		Dir:  "/home/pm/dev/origin/test/extended/cmd",
+	klog.InitFlags(nil)
+	flag.Parse()
+	defer klog.Flush()
+
+	cfg := &packages.Config{
+		// TODO: Tweak Mode to see if speed can be improved
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedCompiledGoFiles |
+			packages.NeedDeps | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedImports |
+			packages.NeedExportFile | packages.NeedModule,
+		Dir: "/home/pm/dev/origin/",
 	}
-	pkgs, err := p.Load(cfg, "")
+
+	paths := []string{"./test/extended/apiserver"}
+	klog.Infof("From %s loading paths: %s\n", cfg.Dir, paths)
+	pkgs, err := packages.Load(cfg, paths...)
 	if err != nil {
-		log.Fatalf("error: %#v\n", err)
+		klog.Fatalf("packages.Load failed: %#v\n", err)
 	}
-	if len(pkgs) != 1 {
-		log.Fatalf("unexpected len(pkgs): %d\n", len(pkgs))
-	}
+	klog.Infof("Loaded %d packages\n", len(pkgs))
 
-	imports := make(map[string]string, 0)
-	for _, file := range pkgs[0].Syntax {
-		// get map of pkg-alias to pkg-url
-		for _, imp := range file.Imports {
-			name, path := getImportNameAndPath(imp)
-			imports[name] = path
+	for _, p := range pkgs {
+		if len(p.Errors) != 0 {
+			klog.Fatalf("%#v\n", p.Errors)
 		}
-
-		ast.Inspect(file, func(n ast.Node) bool {
-			switch v := n.(type) {
-			case *ast.FuncDecl:
-				handleFunc(Func{Name: v.Name.Name, Type: v.Type, Body: v.Body})
-			case *ast.FuncLit:
-				handleFunc(Func{Type: v.Type, Body: v.Body})
-			}
-			return true
-		})
-
-		// ginkgoAlias := getImportName(imports, "ginkgo")
-
-		// for _, decl := range file.Decls {
-
-		// 	switch d := decl.(type) {
-		// 	case *ast.FuncDecl:
-		// 		handleFunc(Func{d.Type, d.Body})
-		// 	case *ast.GenDecl:
-		// 		log.Printf("GenDecl: %#v\n", d)
-		// 		handleGenDecl(d, ginkgoAlias)
-		// 	}
-
-		// }
+		handlePackage(p)
 	}
 }
 
-func getImportNameAndPath(i *ast.ImportSpec) (name string, p string) {
-	p = i.Path.Value
-	if i.Name != nil {
-		name = i.Name.Name
-	} else {
-		_, name = path.Split(strings.Replace(i.Path.Value, "\"", "", -1))
+func handlePackage(p *packages.Package) error {
+	klog.Infof("Inspecting package %s\n", p.ID)
+
+	if len(p.GoFiles) != len(p.Syntax) {
+		klog.Fatal("len(p.GoFiles) != len(p.Syntax) -- INVESTIGATE\n")
 	}
-	return
+
+	for idx, file := range p.Syntax {
+		handleFile(p.GoFiles[idx], file, p)
+	}
+
+	return nil
 }
 
-func getImportName(imports map[string]string, x string) string {
-	for k, v := range imports {
-		if strings.Contains(v, "ginkgo") {
-			return k
+type FuncCall struct {
+	Pkg string
+	// Receiver is a name of the struct for the method. If empty, then FuncName is a function.
+	Receiver string
+	FuncName string
+}
+
+func getFuncCall(ce *ast.CallExpr, p *packages.Package) (*FuncCall, error) {
+	getCallReceiver := func(o types.Object) string {
+		if o == nil {
+			return ""
 		}
-	}
-	return ""
-}
-
-// tryGetFuncBodyFromGenDecl
-func handleGenDecl(decl *ast.GenDecl, ginkgoAlias string) {
-	if decl.Tok != token.VAR {
-		return
-	}
-
-	if len(decl.Specs) != 1 {
-		log.Fatalf("unexpected len(decl.Specs): %d", len(decl.Specs))
-	}
-
-	values, ok := decl.Specs[0].(*ast.ValueSpec)
-	if !ok {
-		log.Fatalf("decl.Specs[0].(*ast.ValueSpec) failed")
-	}
-	if len(values.Values) != 1 {
-		log.Fatalf("unexpected len(values): %d", len(values.Values))
-	}
-
-	call, ok := values.Values[0].(*ast.CallExpr)
-	if !ok {
-		return
-		// log.Fatalf("values.Values[0].(*ast.CallExpr) failed")
-	}
-
-	name, body := ginkgoDescribeCallExprToNameAndBody(call)
-	_ = name
-	_ = body
-	if body == nil {
-		return
-	}
-
-	// look for `oc` creation
-
-	findNewCLI := func(body *ast.BlockStmt) string {
-		for _, stmt := range body.List {
-			assign, ok := stmt.(*ast.AssignStmt)
-			if !ok {
-				continue
+		typ := o.Type()
+		sig, ok := typ.(*types.Signature)
+		if !ok {
+			return ""
+		}
+		recv := sig.Recv()
+		if recv != nil {
+			t := recv.Type()
+			if pointer, ok := t.(*types.Pointer); ok {
+				t = pointer.Elem()
 			}
 
-			if len(assign.Rhs) != 1 {
-				log.Printf("len(assign.Rhs) != 1")
-				continue
-			}
-			call, ok := assign.Rhs[0].(*ast.CallExpr)
-			if !ok {
-				log.Printf("assign.Rhs[0].(*ast.CallExpr) not ok")
-			}
-			if strings.HasPrefix(call.Fun.(*ast.SelectorExpr).Sel.Name, "NewCLI") ||
-				call.Fun.(*ast.SelectorExpr).Sel.Name == runtime.FuncForPC(reflect.ValueOf(NewHypershiftManagementCLI).Pointer()).Name() {
-				log.Printf("found *CLI creation, var is: %s", assign.Lhs[0].(*ast.Ident).Name)
-
-				return assign.Lhs[0].(*ast.Ident).Name
+			if named, ok := t.(*types.Named); ok {
+				return named.Obj().Name()
 			}
 		}
 		return ""
 	}
 
-	cliVar := findNewCLI(body)
-	if cliVar == "" {
-		log.Printf("no CLI found")
-		return
+	funName := ""
+	if ident, ok := ce.Fun.(*ast.Ident); ok {
+		funName = ident.Name
+	} else if se, ok := ce.Fun.(*ast.SelectorExpr); ok {
+		funName = se.Sel.Name
+	} else {
+		return nil, fmt.Errorf("callExpr.Fun is %T, expected: *ast.SelectorExpr or *ast.Ident", ce.Fun)
 	}
 
-	ast.Inspect(body, func(n ast.Node) bool {
-		if _, ok := n.(*ast.CallExpr); ok {
-			fset := token.NewFileSet()
-			b := &bytes.Buffer{}
-			printer.Fprint(b, fset, n)
+	callee := typeutil.Callee(p.TypesInfo, ce)
+	if callee == nil {
+		return &FuncCall{FuncName: funName}, nil
+	}
+	if callee.Pkg() == nil {
+		return &FuncCall{
+			Receiver: getCallReceiver(callee),
+			FuncName: funName,
+		}, nil
+	}
 
-			if strings.HasPrefix(b.String(), cliVar+".") {
-				log.Println(b.String())
-				return false
-			}
+	return &FuncCall{
+		Pkg:      callee.Pkg().Path(),
+		Receiver: getCallReceiver(callee),
+		FuncName: funName,
+	}, nil
+}
+
+func getCallExprArgs(ce *ast.CallExpr, count int) string {
+	if len(ce.Args) == 0 {
+		return ""
+	}
+	if count == -1 || count > len(ce.Args) {
+		count = len(ce.Args)
+	}
+	args := ""
+	var b bytes.Buffer
+	for i := 0; i < count; i++ {
+		if argCallExpr, ok := ce.Args[i].(*ast.BasicLit); ok {
+			printer.Fprint(&b, token.NewFileSet(), argCallExpr)
+			args += b.String()
+		} else {
+			args += fmt.Sprintf("%T", ce.Args[i])
 		}
-
-		return true
-	})
-}
-
-func ginkgoDescribeCallExprToNameAndBody(callExpr *ast.CallExpr) (string, *ast.BlockStmt) {
-	selector := callExpr.Fun.(*ast.SelectorExpr)
-
-	// Check that function is calling a Describe from Ginkgo pkg
-	if selector.X.(*ast.Ident).Name != "g" || selector.Sel.Name != "Describe" {
-		return "", nil
+		if i != len(ce.Args)-1 {
+			args += ", "
+		}
+		b.Reset()
 	}
 
-	return strings.Replace(callExpr.Args[0].(*ast.BasicLit).Value, "\"", "", -1),
-		callExpr.Args[1].(*ast.FuncLit).Body
+	return args
 }
 
-// dummy function for reflection
-// TODO: use func from origin
-func NewHypershiftManagementCLI() {}
+func buildHelpers(path string, f *ast.File, p *packages.Package) error {
+	klog.Infof("Building helpers from %s\n", path)
+
+	rn := NewRootNode()
+	currentNode := rn
+
+	inspector := inspector.New([]*ast.File{f})
+	inspector.WithStack(
+		[]ast.Node{
+			&ast.CallExpr{},
+			&ast.FuncDecl{},
+			&ast.GenDecl{},
+		},
+		func(n ast.Node, push bool, stack []ast.Node) (proceed bool) {
+			proceed = true
+
+			if gd, ok := n.(*ast.GenDecl); ok {
+				if gd.Tok != token.VAR {
+					return
+				}
+				if len(gd.Specs) == 1 {
+					if vs, ok := gd.Specs[0].(*ast.ValueSpec); ok {
+						varName := ""
+						if len(vs.Names) == 1 {
+							varName = vs.Names[0].Name
+						}
+
+						if len(vs.Values) == 1 {
+							if ce, ok := vs.Values[0].(*ast.CallExpr); ok {
+								if se, ok := ce.Fun.(*ast.SelectorExpr); ok {
+									if varName == "_" && se.Sel.Name == "Describe" {
+										// don't go into Ginkgo tests
+										klog.Infof("Found Describe while building helpers\n")
+										return false
+									}
+								}
+							}
+						}
+					}
+				}
+				klog.Infof("Unhandled *ast.GenDecl: %v", spew.Sdump(gd))
+				return
+			}
+
+			if fn, ok := n.(*ast.FuncDecl); ok {
+				if push {
+					klog.V(2).Infof("Helper %s - adding new node", fn.Name.Name)
+					n := NewHelperFunctionNode(p.PkgPath, fn.Name.Name)
+					currentNode.AddChild(n)
+					currentNode = n
+				} else {
+					klog.V(2).Infof("Helper %s - going up", fn.Name.Name)
+					currentNode = currentNode.GetParent()
+				}
+				return
+			}
+
+			if !push {
+				return
+			}
+
+			if ce, ok := n.(*ast.CallExpr); ok {
+				fc, err := getFuncCall(ce, p)
+				if err != nil {
+					klog.Errorf("getFuncCall failed: %s\n", err)
+					return
+				}
+				if fc == nil {
+					klog.Errorf("getFuncCall didn't fail, but fc is nil\n")
+					return
+				}
+				klog.V(3).Infof("func call: %#v\n", fc)
+
+				if strings.Contains(fc.Pkg, "github.com/openshift/client-go") {
+					currentNode.AddChild(NewAPIUsageNode(fc.Pkg, fc.Receiver, fc.FuncName))
+				}
+
+				if strings.Contains(fc.Pkg, "github.com/openshift/origin") &&
+					fc.Pkg != "github.com/openshift/origin/test/extended/util" {
+					currentNode.AddChild(NewHelperFunctionNode(fc.Pkg, fc.FuncName))
+				}
+
+			}
+			return
+		},
+	)
+
+	printTree(rn)
+
+	return nil
+}
+
+func handleFile(path string, f *ast.File, p *packages.Package) error {
+	klog.Infof("Inspecting file %s\n", path)
+	if !strings.Contains(path, "resil") {
+		return nil
+	}
+
+	err := buildHelpers(path, f, p)
+	if err != nil {
+		klog.Errorf("buildHelpers failed: %v\n", err)
+	}
+
+	rn := NewRootNode()
+	currentNode := rn
+	inspector := inspector.New([]*ast.File{f})
+	inspector.WithStack(
+		[]ast.Node{
+			&ast.CallExpr{},
+			&ast.FuncDecl{},
+		},
+		func(n ast.Node, push bool, stack []ast.Node) (proceed bool) {
+			proceed = true
+
+			if _, ok := n.(*ast.FuncDecl); ok {
+				// don't go into pkg-scoped functions just now
+				proceed = false
+				return
+			}
+
+			if ce, ok := n.(*ast.CallExpr); ok {
+				fc, err := getFuncCall(ce, p)
+				if err != nil {
+					klog.Errorf("getFuncCall failed: %s\n", err)
+					return
+				}
+				if fc == nil {
+					klog.Errorf("getFuncCall didn't fail, but fc is nil\n")
+					return
+				}
+				klog.V(3).Infof("func call: %#v\n", fc)
+
+				if fc.Pkg == "github.com/onsi/ginkgo" {
+					if GinkgoNodeType(fc.FuncName) != GinkgoDescribe &&
+						GinkgoNodeType(fc.FuncName) != GinkgoIt {
+						return
+					}
+					if push {
+						ginkgoDesc := getCallExprArgs(ce, 1)
+						n := NewGinkgoNode(GinkgoNodeType(fc.FuncName), path, ginkgoDesc)
+						currentNode.AddChild(n)
+						currentNode = n
+						klog.V(2).Infof("GINKGO DOWN: %v\n", n)
+					} else {
+						klog.V(2).Infof("GINKGO UP: %v\n", fc)
+						currentNode = currentNode.GetParent()
+					}
+					return
+				}
+				if !push {
+					return
+				}
+
+				if strings.Contains(fc.Pkg, "github.com/openshift/client-go") {
+					currentNode.AddChild(NewAPIUsageNode(fc.Pkg, fc.Receiver, fc.FuncName))
+				}
+
+				if strings.Contains(fc.Pkg, "github.com/openshift/origin") &&
+					fc.Pkg != "github.com/openshift/origin/test/extended/util" {
+					currentNode.AddChild(NewHelperFunctionNode(fc.Pkg, fc.FuncName))
+				}
+
+				// if strings.Contains(pkgName, "k8s.io/client-go") {
+				// if strings.Contains(pkgName, "github.com/openshift/origin/test/extended/util") {
+				// if strings.Contains(pkgName, "github.com/openshift/client-go") {
+				// if strings.Contains(pkgName, "k8s.io/client-go/dynamic") {
+				// if strings.Contains(pkgName, "k8s.io/client-go/kubernetes") {
+				// if strings.Contains(pkgName, "k8s.io/client-go/rest") {
+			}
+			return
+		})
+
+	printTree(rn)
+
+	return nil
+}
