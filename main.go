@@ -97,6 +97,8 @@ func getFuncCall(ce *ast.CallExpr, p *packages.Package) (*FuncCall, error) {
 		funName = ident.Name
 	} else if se, ok := ce.Fun.(*ast.SelectorExpr); ok {
 		funName = se.Sel.Name
+	} else if _, ok := ce.Fun.(*ast.ArrayType); ok {
+		return nil, nil
 	} else {
 		return nil, fmt.Errorf("callExpr.Fun is %T, expected: *ast.SelectorExpr or *ast.Ident", ce.Fun)
 	}
@@ -212,7 +214,6 @@ func buildHelpers(path string, f *ast.File, p *packages.Package) Node {
 					return
 				}
 				if n == nil {
-					klog.Errorf("buildHelpers > callExprIntoNode didn't fail, but node is nil\n")
 					return
 				}
 
@@ -256,7 +257,6 @@ func handleFile(path string, f *ast.File, p *packages.Package) error {
 					return
 				}
 				if n == nil {
-					// klog.Errorf("callExprIntoNode didn't fail, but node is nil\n")
 					return
 				}
 
@@ -292,13 +292,23 @@ func handleFile(path string, f *ast.File, p *packages.Package) error {
 	return nil
 }
 
+func isAPICall(fc *FuncCall) bool {
+	if fc.Pkg == "github.com/openshift/origin/pkg/test/ginkgo/result" {
+		return false
+	}
+
+	return strings.Contains(fc.Pkg, "github.com/openshift/client-go") ||
+		strings.Contains(fc.Pkg, "k8s.io/client-go") ||
+		fc.Pkg == "github.com/openshift/origin/test/extended/util"
+}
+
 func callExprIntoNode(ce *ast.CallExpr, p *packages.Package, path string) (Node, error) {
 	fc, err := getFuncCall(ce, p)
 	if err != nil {
 		return nil, fmt.Errorf("getFuncCall failed: %w", err)
 	}
 	if fc == nil {
-		return nil, fmt.Errorf("getFuncCall didn't fail, but fc is nil")
+		return nil, nil
 	}
 
 	klog.V(3).Infof("func call: %#v\n", fc)
@@ -311,23 +321,22 @@ func callExprIntoNode(ce *ast.CallExpr, p *packages.Package, path string) (Node,
 		return NewGinkgoNode(GinkgoNodeType(fc.FuncName), path, getCallExprArgs(ce, 1)), nil
 	}
 
-	if strings.Contains(fc.Pkg, "github.com/openshift/client-go") {
-		return NewAPIUsageNode(fc.Pkg, fc.Receiver, fc.FuncName), nil
+	if fc.Pkg == "github.com/openshift/origin/test/extended/util" {
+		if fc.FuncName == "Run" {
+			return NewAPIUsageNodeWithArgs(fc.Pkg, fc.Receiver, fc.FuncName, getCallExprArgs(ce, -1)), nil
+		}
+		return nil, nil
 	}
 
-	if strings.Contains(fc.Pkg, "github.com/openshift/origin") &&
-		fc.Pkg != "github.com/openshift/origin/test/extended/util" {
+	if strings.Contains(fc.Pkg, "github.com/openshift/origin") {
 		return NewHelperFunctionNode(fc.Pkg, fc.FuncName), nil
 	}
 
-	// if strings.Contains(pkgName, "k8s.io/client-go") {
-	// if strings.Contains(pkgName, "github.com/openshift/origin/test/extended/util") {
-	// if strings.Contains(pkgName, "github.com/openshift/client-go") {
-	// if strings.Contains(pkgName, "k8s.io/client-go/dynamic") {
-	// if strings.Contains(pkgName, "k8s.io/client-go/kubernetes") {
-	// if strings.Contains(pkgName, "k8s.io/client-go/rest") {
+	if isAPICall(fc) {
+		return NewAPIUsageNode(fc.Pkg, fc.Receiver, fc.FuncName), nil
+	}
 
-	// klog.V(2).Infof("WARNING: Unhandled FuncCall: %v\n", fc)
+	klog.V(2).Infof("WARNING: Ignored FuncCall: %v\n", fc)
 
-	return nil, fmt.Errorf("unhandled funccall: %v", fc)
+	return nil, nil
 }

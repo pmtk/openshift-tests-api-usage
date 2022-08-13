@@ -86,17 +86,22 @@ type APIUsageNode struct {
 	Pkg  string
 	Recv string
 	Func string
+	Args string
 }
 
 func NewAPIUsageNode(pkg, recv, fun string) Node {
 	return &APIUsageNode{Pkg: pkg, Recv: recv, Func: fun}
 }
 
+func NewAPIUsageNodeWithArgs(pkg, recv, fun, args string) Node {
+	return &APIUsageNode{Pkg: pkg, Recv: recv, Func: fun, Args: args}
+}
+
 func (a *APIUsageNode) String() string {
 	if a.Recv != "" {
-		return fmt.Sprintf("API (%s.%s).%s()", a.Pkg, a.Recv, a.Func)
+		return fmt.Sprintf("API (%s.%s).%s(%s)", a.Pkg, a.Recv, a.Func, a.Args)
 	}
-	return fmt.Sprintf("API: (%s).%s()", a.Pkg, a.Func)
+	return fmt.Sprintf("API: (%s).%s(%s)", a.Pkg, a.Func, a.Args)
 }
 
 //////////////////////////////////////////////////
