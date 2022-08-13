@@ -46,6 +46,8 @@ type RootNode struct {
 	node
 }
 
+func (rn *RootNode) String() string { return "Root" }
+
 func NewRootNode() Node { return &RootNode{} }
 
 //////////////////////////////////////////////////
@@ -130,5 +132,5 @@ func nodeAndChildString(n Node, level int) string {
 }
 
 func printTree(root Node) {
-	fmt.Printf("%s\n", nodeAndChildString(root, 0))
+	fmt.Printf("%s\n", nodeAndChildString(root, 1))
 }
