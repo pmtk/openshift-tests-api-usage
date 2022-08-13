@@ -139,12 +139,9 @@ func getCallExprArgs(ce *ast.CallExpr, count int) string {
 	args := ""
 	var b bytes.Buffer
 	for i := 0; i < count; i++ {
-		if argCallExpr, ok := ce.Args[i].(*ast.BasicLit); ok {
-			printer.Fprint(&b, token.NewFileSet(), argCallExpr)
-			args += b.String()
-		} else {
-			args += fmt.Sprintf("%T", ce.Args[i])
-		}
+		printer.Fprint(&b, token.NewFileSet(), ce.Args[i])
+		args += b.String()
+
 		if i != len(ce.Args)-1 {
 			args += ", "
 		}
