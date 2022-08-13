@@ -206,26 +206,21 @@ func buildHelpers(path string, f *ast.File, p *packages.Package) error {
 			}
 
 			if ce, ok := n.(*ast.CallExpr); ok {
-				fc, err := getFuncCall(ce, p)
+				n, err := callExprIntoNode(ce, p, path)
 				if err != nil {
-					klog.Errorf("getFuncCall failed: %s\n", err)
+					klog.Errorf("buildHelpers > callExprIntoNode failed: %v\n", err)
 					return
 				}
-				if fc == nil {
-					klog.Errorf("getFuncCall didn't fail, but fc is nil\n")
+				if n == nil {
+					klog.Errorf("buildHelpers > callExprIntoNode didn't fail, but node is nil\n")
 					return
 				}
-				klog.V(3).Infof("func call: %#v\n", fc)
 
-				if strings.Contains(fc.Pkg, "github.com/openshift/client-go") {
-					currentNode.AddChild(NewAPIUsageNode(fc.Pkg, fc.Receiver, fc.FuncName))
+				_, isGinkgo := n.(*GinkgoNode)
+				if isGinkgo {
+					return
 				}
-
-				if strings.Contains(fc.Pkg, "github.com/openshift/origin") &&
-					fc.Pkg != "github.com/openshift/origin/test/extended/util" {
-					currentNode.AddChild(NewHelperFunctionNode(fc.Pkg, fc.FuncName))
-				}
-
+				currentNode.AddChild(n)
 			}
 			return
 		},
@@ -259,64 +254,86 @@ func handleFile(path string, f *ast.File, p *packages.Package) error {
 			proceed = true
 
 			if _, ok := n.(*ast.FuncDecl); ok {
-				// don't go into pkg-scoped functions just now
+				// don't go into pkg-scoped functions - they'll handled by another inspector
 				proceed = false
 				return
 			}
 
 			if ce, ok := n.(*ast.CallExpr); ok {
-				fc, err := getFuncCall(ce, p)
+				n, err := callExprIntoNode(ce, p, path)
 				if err != nil {
-					klog.Errorf("getFuncCall failed: %s\n", err)
+					klog.Errorf("callExprIntoNode failed: %v\n", err)
 					return
 				}
-				if fc == nil {
-					klog.Errorf("getFuncCall didn't fail, but fc is nil\n")
+				if n == nil {
+					// klog.Errorf("callExprIntoNode didn't fail, but node is nil\n")
 					return
 				}
-				klog.V(3).Infof("func call: %#v\n", fc)
 
-				if fc.Pkg == "github.com/onsi/ginkgo" {
-					if GinkgoNodeType(fc.FuncName) != GinkgoDescribe &&
-						GinkgoNodeType(fc.FuncName) != GinkgoIt {
+				if _, ok := n.(*GinkgoNode); ok {
+					if !push {
+						klog.V(2).Infof("GINKGO UP: %v\n", n)
+						currentNode = currentNode.GetParent()
 						return
 					}
-					if push {
-						ginkgoDesc := getCallExprArgs(ce, 1)
-						n := NewGinkgoNode(GinkgoNodeType(fc.FuncName), path, ginkgoDesc)
-						currentNode.AddChild(n)
-						currentNode = n
-						klog.V(2).Infof("GINKGO DOWN: %v\n", n)
-					} else {
-						klog.V(2).Infof("GINKGO UP: %v\n", fc)
-						currentNode = currentNode.GetParent()
-					}
+
+					klog.V(2).Infof("GINKGO ADDING A NODE: %v\n", n)
+					currentNode.AddChild(n)
+					currentNode = n
 					return
 				}
+
 				if !push {
 					return
 				}
 
-				if strings.Contains(fc.Pkg, "github.com/openshift/client-go") {
-					currentNode.AddChild(NewAPIUsageNode(fc.Pkg, fc.Receiver, fc.FuncName))
-				}
-
-				if strings.Contains(fc.Pkg, "github.com/openshift/origin") &&
-					fc.Pkg != "github.com/openshift/origin/test/extended/util" {
-					currentNode.AddChild(NewHelperFunctionNode(fc.Pkg, fc.FuncName))
-				}
-
-				// if strings.Contains(pkgName, "k8s.io/client-go") {
-				// if strings.Contains(pkgName, "github.com/openshift/origin/test/extended/util") {
-				// if strings.Contains(pkgName, "github.com/openshift/client-go") {
-				// if strings.Contains(pkgName, "k8s.io/client-go/dynamic") {
-				// if strings.Contains(pkgName, "k8s.io/client-go/kubernetes") {
-				// if strings.Contains(pkgName, "k8s.io/client-go/rest") {
+				currentNode.AddChild(n)
 			}
+
 			return
 		})
 
 	printTree(rn)
 
 	return nil
+}
+
+func callExprIntoNode(ce *ast.CallExpr, p *packages.Package, path string) (Node, error) {
+	fc, err := getFuncCall(ce, p)
+	if err != nil {
+		return nil, fmt.Errorf("getFuncCall failed: %w", err)
+	}
+	if fc == nil {
+		return nil, fmt.Errorf("getFuncCall didn't fail, but fc is nil")
+	}
+
+	klog.V(3).Infof("func call: %#v\n", fc)
+
+	if fc.Pkg == "github.com/onsi/ginkgo" {
+		if GinkgoNodeType(fc.FuncName) != GinkgoDescribe &&
+			GinkgoNodeType(fc.FuncName) != GinkgoIt {
+			return nil, nil
+		}
+		return NewGinkgoNode(GinkgoNodeType(fc.FuncName), path, getCallExprArgs(ce, 1)), nil
+	}
+
+	if strings.Contains(fc.Pkg, "github.com/openshift/client-go") {
+		return NewAPIUsageNode(fc.Pkg, fc.Receiver, fc.FuncName), nil
+	}
+
+	if strings.Contains(fc.Pkg, "github.com/openshift/origin") &&
+		fc.Pkg != "github.com/openshift/origin/test/extended/util" {
+		return NewHelperFunctionNode(fc.Pkg, fc.FuncName), nil
+	}
+
+	// if strings.Contains(pkgName, "k8s.io/client-go") {
+	// if strings.Contains(pkgName, "github.com/openshift/origin/test/extended/util") {
+	// if strings.Contains(pkgName, "github.com/openshift/client-go") {
+	// if strings.Contains(pkgName, "k8s.io/client-go/dynamic") {
+	// if strings.Contains(pkgName, "k8s.io/client-go/kubernetes") {
+	// if strings.Contains(pkgName, "k8s.io/client-go/rest") {
+
+	klog.Infof("WARNING: Unhandled FuncCall: %v\n", fc)
+
+	return nil, nil
 }
