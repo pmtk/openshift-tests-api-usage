@@ -144,7 +144,7 @@ func getCallExprArgs(ce *ast.CallExpr, count int) string {
 	return args
 }
 
-func buildHelpers(path string, f *ast.File, p *packages.Package) error {
+func buildHelpers(path string, f *ast.File, p *packages.Package) Node {
 	klog.Infof("Building helpers from %s\n", path)
 
 	rn := NewRootNode()
@@ -226,21 +226,11 @@ func buildHelpers(path string, f *ast.File, p *packages.Package) error {
 		},
 	)
 
-	printTree(rn)
-
-	return nil
+	return rn
 }
 
 func handleFile(path string, f *ast.File, p *packages.Package) error {
 	klog.Infof("Inspecting file %s\n", path)
-	if !strings.Contains(path, "resil") {
-		return nil
-	}
-
-	err := buildHelpers(path, f, p)
-	if err != nil {
-		klog.Errorf("buildHelpers failed: %v\n", err)
-	}
 
 	rn := NewRootNode()
 	currentNode := rn
@@ -272,12 +262,12 @@ func handleFile(path string, f *ast.File, p *packages.Package) error {
 
 				if _, ok := n.(*GinkgoNode); ok {
 					if !push {
-						klog.V(2).Infof("GINKGO UP: %v\n", n)
 						currentNode = currentNode.GetParent()
+						klog.V(2).Infof("GINKGO UP | CURRENT NODE: %v\n", currentNode)
 						return
 					}
 
-					klog.V(2).Infof("GINKGO ADDING A NODE: %v\n", n)
+					klog.V(2).Infof("GINKGO ADDING NEW TREE NODE: %v\n", n)
 					currentNode.AddChild(n)
 					currentNode = n
 					return
@@ -293,7 +283,11 @@ func handleFile(path string, f *ast.File, p *packages.Package) error {
 			return
 		})
 
+	helpers := buildHelpers(path, f, p)
 	printTree(rn)
+	if helpers != nil {
+		printTree(helpers)
+	}
 
 	return nil
 }
@@ -333,7 +327,7 @@ func callExprIntoNode(ce *ast.CallExpr, p *packages.Package, path string) (Node,
 	// if strings.Contains(pkgName, "k8s.io/client-go/kubernetes") {
 	// if strings.Contains(pkgName, "k8s.io/client-go/rest") {
 
-	klog.Infof("WARNING: Unhandled FuncCall: %v\n", fc)
+	// klog.V(2).Infof("WARNING: Unhandled FuncCall: %v\n", fc)
 
-	return nil, nil
+	return nil, fmt.Errorf("unhandled funccall: %v", fc)
 }
