@@ -12,6 +12,7 @@ TODO:
 - Transform API nodes into specific k8s/ocp API packages
 - Export a summary: Ginkgo nodes + API used
 - Run for whole origin repo
+- Handle: `authorizationv1.GroupVersion.WithResource(tt.resource).GroupResource()`
 */
 
 func main() {
@@ -19,7 +20,11 @@ func main() {
 	flag.Parse()
 	defer klog.Flush()
 
-	origin, err := ParseOrigin("/home/pm/dev/origin/", []string{"./test/extended/apiserver"})
+	origin, err := ParseOrigin("/home/pm/dev/origin/", []string{
+		"./test/extended/apiserver",
+		"./test/extended/authentication",
+		"./test/extended/authorization/",
+	})
 	if err != nil {
 		klog.Fatalf("Failed to build test tree: %#v\n", err)
 	}

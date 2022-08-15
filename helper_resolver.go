@@ -20,8 +20,8 @@ func checkIfAllResolved(m map[string]*HelperFunctionNode) bool {
 }
 
 type ResolvedHelperFunction struct {
-	Pkg, Func string
-	APICalls  []string
+	Pkg, Recv, Func string
+	APICalls        []string
 }
 
 func resolveHelperTree(rn Node) (map[string]ResolvedHelperFunction, error) {
@@ -104,7 +104,7 @@ func resolveHelperTree(rn Node) (map[string]ResolvedHelperFunction, error) {
 	//   api calls: []string with hashed API calls
 	res := make(map[string]ResolvedHelperFunction, len(hs))
 	for k, v := range hs {
-		rhf := ResolvedHelperFunction{Pkg: v.Pkg, Func: v.Func}
+		rhf := ResolvedHelperFunction{Pkg: v.Pkg, Recv: v.Recv, Func: v.Func}
 
 		dedupSet := map[string]struct{}{}
 		for _, a := range v.children {

@@ -8,7 +8,6 @@ import (
 	"go/token"
 	"go/types"
 
-	"github.com/davecgh/go-spew/spew"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/types/typeutil"
@@ -78,8 +77,12 @@ func handlePackage(p *packages.Package) (Node, Node, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to handle file %s: %w", p.GoFiles[idx], err)
 		}
-		tests.AddChildren(ts.GetChildren())
-		helpers.AddChildren(hs.GetChildren())
+		if ts != nil {
+			tests.AddChildren(ts.GetChildren())
+		}
+		if hs != nil {
+			helpers.AddChildren(hs.GetChildren())
+		}
 	}
 
 	return tests, helpers, nil
@@ -143,14 +146,26 @@ func buildHelpers(path string, f *ast.File, p *packages.Package) (Node, error) {
 						}
 					}
 				}
-				klog.Infof("Unhandled *ast.GenDecl: %v", spew.Sdump(gd))
 				return
 			}
 
 			if fn, ok := n.(*ast.FuncDecl); ok {
 				if push {
 					klog.V(2).Infof("Helper %s - adding new node", fn.Name.Name)
-					n := NewHelperFunctionNode(p.PkgPath, fn.Name.Name)
+					recv := ""
+					if fn.Recv != nil {
+						klog.Info(".")
+						if len(fn.Recv.List) != 1 {
+							panic("investigate")
+						}
+						ident, ok := fn.Recv.List[0].Type.(*ast.Ident)
+						if !ok {
+							panic("investigate")
+						}
+
+						recv = ident.Name
+					}
+					n := NewHelperFunctionNode(p.PkgPath, recv, fn.Name.Name)
 					currentNode.AddChild(n)
 					currentNode = n
 				} else {
@@ -263,6 +278,8 @@ func NewFuncCall(ce *ast.CallExpr, p *packages.Package) (*FuncCall, error) {
 		funName = se.Sel.Name
 	} else if _, ok := ce.Fun.(*ast.ArrayType); ok {
 		return nil, nil
+	} else if _, ok := ce.Fun.(*ast.FuncLit); ok {
+		return nil, nil
 	} else {
 		return nil, fmt.Errorf("callExpr.Fun is %T, expected: *ast.SelectorExpr or *ast.Ident", ce.Fun)
 	}
@@ -306,6 +323,10 @@ func NewFuncCall(ce *ast.CallExpr, p *packages.Package) (*FuncCall, error) {
 				return named.Obj().Name()
 			}
 		}
+
+		// following returns "" following (executing run from struct{run: func}):
+		// https://github.com/openshift/origin/blob/80e4580ea73536c8f9193c749cf5c9e14e70e1ab/test/extended/authorization/authorization_rbac_proxy.go#L860
+		// no receiver since these are funcs, not methods, but looks weird in summary
 		return ""
 	}(callee)
 

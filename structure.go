@@ -58,7 +58,7 @@ func NewNodeFromCallExpr(ce *ast.CallExpr, p *packages.Package, path string) (No
 	}
 
 	if strings.Contains(fc.Pkg, "github.com/openshift/origin") {
-		return NewHelperFunctionNode(fc.Pkg, fc.FuncName), nil
+		return NewHelperFunctionNode(fc.Pkg, fc.Receiver, fc.FuncName), nil
 	}
 
 	if isAPICall(fc) {
@@ -189,21 +189,23 @@ var _ Node = (*HelperFunctionNode)(nil)
 type HelperFunctionNode struct {
 	node
 	Pkg  string
+	Recv string
 	Func string
 }
 
-func NewHelperFunctionNode(pkg, fun string) Node {
-	// Current assumption that helper function is not a method might be wrong (most likely for upgrade tests)
-	// TODO: Handle helper methods if needed
-	return &HelperFunctionNode{Pkg: pkg, Func: fun}
+func NewHelperFunctionNode(pkg, recv, fun string) Node {
+	return &HelperFunctionNode{Pkg: pkg, Recv: recv, Func: fun}
 }
 
 func (a *HelperFunctionNode) String() string {
+	if a.Recv != "" {
+		return fmt.Sprintf("Helper: (%s.%s).%s()", a.Pkg, a.Recv, a.Func)
+	}
 	return fmt.Sprintf("Helper: (%s).%s()", a.Pkg, a.Func)
 }
 
 func (a *HelperFunctionNode) Hash() string {
-	return fmt.Sprintf("%s#%s", a.Pkg, a.Func)
+	return fmt.Sprintf("%s#%s#%s", a.Pkg, a.Recv, a.Func)
 }
 
 //////////////////////////////////////////////////
