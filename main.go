@@ -289,6 +289,10 @@ func buildTestsTree(path string, f *ast.File, p *packages.Package) Node {
 func handleFile(path string, f *ast.File, p *packages.Package) error {
 	klog.Infof("Inspecting file %s\n", path)
 
+	if !strings.Contains(path, "apply.go") {
+		return nil
+	}
+
 	tests := buildTestsTree(path, f, p)
 	helpers := buildHelpers(path, f, p)
 
@@ -297,6 +301,7 @@ func handleFile(path string, f *ast.File, p *packages.Package) error {
 	}
 	if helpers != nil {
 		printTree(helpers)
+		resolveHelperTree(helpers)
 	}
 
 	return nil
@@ -350,3 +355,45 @@ func callExprIntoNode(ce *ast.CallExpr, p *packages.Package, path string) (Node,
 
 	return nil, nil
 }
+
+
+// func resolveHelperNodeAPICalls(hs map[string]*HelperFunctionNode, node *HelperFunctionNode) []Node {
+// 	// hfn := &HelperFunctionNode{}
+// 	res := make([]*APIUsageNode, 0)
+
+// 	// for idx, c := range node.children {
+// 	for i := 0; i < len(node.children); i++ {
+// 		c := node.children[i]
+// 		apiCall, ok := c.(*APIUsageNode)
+// 		if ok {
+// 			res = append(res, apiCall)
+// 			continue
+// 		}
+
+// 		helperCall, ok := c.(*HelperFunctionNode)
+// 		if !ok {
+// 			klog.Fatalf("helperCall is not a HelperFunctionNode\n")
+// 		}
+
+// 		apiCalls := resolveHelperNodeAPICalls(hs, helperCall)
+
+// 	}
+
+// 	return res
+// }
+
+// func resolveHelperNode(hs map[string]*HelperFunctionNode, node *HelperFunctionNode) *HelperFunctionNode {
+// 	// hfn := &HelperFunctionNode{}
+
+// 	for idx, c := range node.children {
+// 		helperCall, ok := c.(*HelperFunctionNode)
+// 		if !ok {
+// 			continue
+// 		}
+
+// 		cn := resolveHelperNode(hs, helperCall)
+
+// 	}
+
+// 	return node
+// }

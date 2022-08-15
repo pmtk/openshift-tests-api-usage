@@ -1,6 +1,8 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Node interface {
 	String() string
@@ -104,6 +106,15 @@ func (a *APIUsageNode) String() string {
 	return fmt.Sprintf("API: (%s).%s(%s)", a.Pkg, a.Func, a.Args)
 }
 
+func (a *APIUsageNode) Hash() string {
+	// TODO: Handle Args if relevant (probably just for *CLI?)
+	return fmt.Sprintf("%s#%s#%s", a.Pkg, a.Recv, a.Func)
+}
+
+func (a *APIUsageNode) AddChild(c Node) {
+	panic("APIUsageNode is not expected to have children")
+}
+
 //////////////////////////////////////////////////
 
 var _ Node = (*HelperFunctionNode)(nil)
@@ -115,11 +126,17 @@ type HelperFunctionNode struct {
 }
 
 func NewHelperFunctionNode(pkg, fun string) Node {
+	// Current assumption that helper function is not a method might be wrong (most likely for upgrade tests)
+	// TODO: Handle helper methods if needed
 	return &HelperFunctionNode{Pkg: pkg, Func: fun}
 }
 
 func (a *HelperFunctionNode) String() string {
 	return fmt.Sprintf("Helper: (%s).%s()", a.Pkg, a.Func)
+}
+
+func (a *HelperFunctionNode) Hash() string {
+	return fmt.Sprintf("%s#%s", a.Pkg, a.Func)
 }
 
 //////////////////////////////////////////////////
