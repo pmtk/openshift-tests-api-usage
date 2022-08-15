@@ -9,7 +9,6 @@ import (
 
 /*
 TODO:
-- Merge test and helper trees: any helper node should be changed to list of API calls
 - Transform API nodes into specific k8s/ocp API packages
 - Export a summary: Ginkgo nodes + API used
 - Run for whole origin repo
@@ -34,4 +33,7 @@ func main() {
 	}
 
 	spew.Dump(hs)
+
+	// TODO: Go over origin.Tests and transform Helper (flatten its API calls) and API nodes
+	// TODO: Process "transformed API calls" - this should be close to final report of Tests+API their using
 }
