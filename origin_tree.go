@@ -7,6 +7,7 @@ import (
 	"go/printer"
 	"go/token"
 	"go/types"
+	"path"
 	"strings"
 
 	"golang.org/x/tools/go/ast/inspector"
@@ -31,7 +32,7 @@ func NewOrigin() *Origin {
 }
 
 func ParseOrigin(originPath string, originPkgs []string) (*Origin, error) {
-	klog.Infof("From %s loading paths: %s\n", originPath, originPkgs)
+	klog.Infof("Loading packages from %s\n", originPath)
 
 	cfg := &packages.Config{
 		// TODO: Tweak Mode to see if speed can be improved
@@ -51,7 +52,7 @@ func ParseOrigin(originPath string, originPkgs []string) (*Origin, error) {
 		if len(p.Errors) != 0 {
 			for _, e := range p.Errors {
 				if !strings.Contains(e.Msg, "no Go files") {
-			return nil, fmt.Errorf("internal package errror: %#v", p.Errors)
+					return nil, fmt.Errorf("internal package errror: %#v", p.Errors)
 				}
 			}
 		}
@@ -112,6 +113,70 @@ func handleFile(path string, f *ast.File, p *packages.Package) (Node, Node, erro
 	return tests, helpers, nil
 }
 
+func isCallExprGinkgo(ce *ast.CallExpr, f *ast.File) bool {
+	importName := ""
+
+	for _, imprt := range f.Imports {
+		imp := strings.ReplaceAll(imprt.Path.Value, "\"", "")
+		if imp == "github.com/onsi/ginkgo" {
+			if imprt.Name != nil {
+				importName = imprt.Name.Name
+			} else {
+				_, importName = path.Split(imp)
+			}
+			break
+		}
+	}
+
+	if importName == "." {
+		if ident, ok := ce.Fun.(*ast.Ident); ok {
+			if ident.Name == "Describe" {
+				return true
+			}
+		}
+	}
+
+	if importName != "" {
+		if se, ok := ce.Fun.(*ast.SelectorExpr); ok {
+			ident, ok := se.X.(*ast.Ident)
+			if !ok {
+				panic("isCallExprGinkgo: expected se.X to be *ast.Ident")
+			}
+
+			if ident.Name == importName && se.Sel.Name == "Describe" {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func checkStackIfInsideGinkgo(f *ast.File, stack []ast.Node) bool {
+	// stack:
+	// 0 - file (ast.File)
+	// 1 - var (ast.GenDecl)
+	// 2 - "_" (ast.ValueSpec)
+	// 3 - [g.]Describe (ast.CallExpr)
+	if len(stack) < 4 {
+		return false
+	}
+	if _, ok := stack[0].(*ast.File); !ok {
+		return false
+	}
+	if _, ok := stack[1].(*ast.GenDecl); !ok {
+		return false
+	}
+	if _, ok := stack[2].(*ast.ValueSpec); !ok {
+		// could be checked if `_`
+		return false
+	}
+	if ce, ok := stack[3].(*ast.CallExpr); ok {
+		return isCallExprGinkgo(ce, f)
+	}
+	return false
+}
+
 func buildHelpers(path string, f *ast.File, p *packages.Package) (Node, error) {
 	rn := NewRootNode()
 	currentNode := rn
@@ -137,22 +202,10 @@ func buildHelpers(path string, f *ast.File, p *packages.Package) (Node, error) {
 				}
 				if len(gd.Specs) == 1 {
 					if vs, ok := gd.Specs[0].(*ast.ValueSpec); ok {
-						varName := ""
-						if len(vs.Names) == 1 {
-							varName = vs.Names[0].Name
-						}
-
 						if len(vs.Values) == 1 {
 							if ce, ok := vs.Values[0].(*ast.CallExpr); ok {
-								if se, ok := ce.Fun.(*ast.SelectorExpr); ok {
-									if varName == "_" && se.Sel.Name == "Describe" {
-										// don't go into Ginkgo tests
-										return false
-									}
-								} else if ident, ok := ce.Fun.(*ast.Ident); ok {
-									if varName == "_" && ident.Name == "Describe" {
-										return false
-									}
+								if isCallExprGinkgo(ce, f) {
+									return false
 								}
 							}
 						}
@@ -173,10 +226,10 @@ func buildHelpers(path string, f *ast.File, p *packages.Package) (Node, error) {
 							if ident, ok := star.X.(*ast.Ident); ok {
 								recv = ident.Name
 							} else {
-							panic("investigate")
-						}
+								panic("investigate")
+							}
 						} else if ident, ok := fn.Recv.List[0].Type.(*ast.Ident); ok {
-						recv = ident.Name
+							recv = ident.Name
 						} else {
 							panic("investigate")
 						}
@@ -269,7 +322,9 @@ func buildTestsTree(path string, f *ast.File, p *packages.Package) (Node, error)
 					return
 				}
 
-				currentNode.AddChild(n)
+				if checkStackIfInsideGinkgo(f, stack) {
+					currentNode.AddChild(n)
+				}
 			}
 
 			return
@@ -346,7 +401,7 @@ func NewFuncCall(ce *ast.CallExpr, p *packages.Package) (*FuncCall, error) {
 			}
 		}
 
-		// following returns "" following (executing run from struct{run: func}):
+		// following returns "" (executing run from struct{run: func}):
 		// https://github.com/openshift/origin/blob/80e4580ea73536c8f9193c749cf5c9e14e70e1ab/test/extended/authorization/authorization_rbac_proxy.go#L860
 		// no receiver since these are funcs, not methods, but looks weird in summary
 		return ""
