@@ -7,6 +7,7 @@ import (
 	"go/printer"
 	"go/token"
 	"go/types"
+	"strings"
 
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/packages"
@@ -45,7 +46,11 @@ func ParseOrigin(originPath string, originPkgs []string) (*Origin, error) {
 
 	for _, p := range pkgs {
 		if len(p.Errors) != 0 {
+			for _, e := range p.Errors {
+				if !strings.Contains(e.Msg, "no Go files") {
 			return nil, fmt.Errorf("internal package errror: %#v", p.Errors)
+				}
+			}
 		}
 	}
 
