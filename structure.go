@@ -65,6 +65,8 @@ func NewNodeFromCallExpr(ce *ast.CallExpr, p *packages.Package, path string) (No
 		return NewAPIUsageNode(fc.Pkg, fc.Receiver, fc.FuncName), nil
 	}
 
+	// TODO: Handle wait.Poll
+	// TODO: Explicit ignore map[pkg][]string{funccall}
 	klog.V(2).Infof("WARNING: Ignored FuncCall: %v\n", fc)
 
 	return nil, nil

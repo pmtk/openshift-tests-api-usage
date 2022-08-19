@@ -15,6 +15,9 @@ import (
 	klog "k8s.io/klog/v2"
 )
 
+// TODO: Handle InBareMetalIPv4ClusterContext from test/extended/networking/services.go
+// TODO: Make sure table driven tests are handled correctly
+
 type Origin struct {
 	Tests   Node
 	Helpers Node

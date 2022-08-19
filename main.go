@@ -15,6 +15,7 @@ TODO:
 - Export a summary: Ginkgo nodes + API used
 - Run for whole origin repo
 - Handle: `authorizationv1.GroupVersion.WithResource(tt.resource).GroupResource()`
+- Tests can declare local helpers: https://github.com/openshift/origin/blob/80e4580ea73536c8f9193c749cf5c9e14e70e1ab/test/extended/cli/builds.go#L200
 */
 
 var ignoreDirs = []string{
