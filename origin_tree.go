@@ -146,6 +146,10 @@ func buildHelpers(path string, f *ast.File, p *packages.Package) (Node, error) {
 										// don't go into Ginkgo tests
 										return false
 									}
+								} else if ident, ok := ce.Fun.(*ast.Ident); ok {
+									if varName == "_" && ident.Name == "Describe" {
+										return false
+									}
 								}
 							}
 						}
