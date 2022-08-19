@@ -163,16 +163,20 @@ func buildHelpers(path string, f *ast.File, p *packages.Package) (Node, error) {
 					klog.V(2).Infof("Helper %s - adding new node", fn.Name.Name)
 					recv := ""
 					if fn.Recv != nil {
-						klog.Info(".")
 						if len(fn.Recv.List) != 1 {
 							panic("investigate")
 						}
-						ident, ok := fn.Recv.List[0].Type.(*ast.Ident)
-						if !ok {
+						if star, ok := fn.Recv.List[0].Type.(*ast.StarExpr); ok {
+							if ident, ok := star.X.(*ast.Ident); ok {
+								recv = ident.Name
+							} else {
 							panic("investigate")
 						}
-
+						} else if ident, ok := fn.Recv.List[0].Type.(*ast.Ident); ok {
 						recv = ident.Name
+						} else {
+							panic("investigate")
+						}
 					}
 					n := NewHelperFunctionNode(p.PkgPath, recv, fn.Name.Name)
 					currentNode.AddChild(n)
