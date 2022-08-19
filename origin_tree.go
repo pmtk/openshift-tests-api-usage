@@ -293,6 +293,12 @@ func NewFuncCall(ce *ast.CallExpr, p *packages.Package) (*FuncCall, error) {
 		return nil, nil
 	} else if _, ok := ce.Fun.(*ast.FuncLit); ok {
 		return nil, nil
+	} else if _, ok := ce.Fun.(*ast.IndexExpr); ok {
+		// test/e2e/upgrade/monitor.go - sequence()
+		return nil, nil
+	} else if _, ok := ce.Fun.(*ast.ParenExpr); ok {
+		// test/extended/cluster/metrics/metrics.go - (*TestDuration)(nil)
+		return nil, nil
 	} else {
 		return nil, fmt.Errorf("callExpr.Fun is %T, expected: *ast.SelectorExpr or *ast.Ident", ce.Fun)
 	}
