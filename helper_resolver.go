@@ -79,6 +79,13 @@ func resolveHelperTree(rn Node) (map[string]ResolvedHelperFunction, error) {
 				c := v.children[i]
 				helperCall, ok := c.(*HelperFunctionNode)
 				if ok {
+					if v.Pkg == helperCall.Pkg &&
+						v.Func == helperCall.Func &&
+						v.Recv == helperCall.Recv {
+						// avoid recursive calls
+						continue
+					}
+
 					if dependency, found := hs[helperCall.Hash()]; found {
 						apiCalls = append(apiCalls, dependency.children...)
 					}
