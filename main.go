@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"go/types"
 	"io/fs"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,9 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 	klog "k8s.io/klog/v2"
 )
+
+// TODO: Transform API calls based on (Pkg, Recv, Func, Args) to get actual API used
+// TODO: Prepare final report: tests (It level) +APIs used
 
 var ignoreDirs = []string{
 	"test/extended/testdata", "test/extended/testdata/",
@@ -47,23 +51,19 @@ func main() {
 	buildReportUsingRTA(originPath, pkgs)
 }
 
-// call is a function call in context of specific ginkgo node
-type call struct {
+// FunCallInTest is a function FunCallInTest in context of specific ginkgo node
+type FunCallInTest struct {
 	Test    []string // [Describe-Description, [Context-Description...], It-Description]
-	Call    funcCall
+	Call    FuncCall
 	Ignored bool // Ignored informs if function call is not API calls, but persisted for debugging purposes
 }
 
-type funcCall struct {
+type FuncCall struct {
 	Pkg  string
+	Recv string
 	Func string
 	Args []string
 }
-
-// type pkgCalls struct {
-// 	Pkg  string
-// 	Func []string
-// }
 
 type report struct {
 	// Ignored
@@ -131,8 +131,8 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 	klog.V(2).Infof("rta.Analyze - end after %s\n", time.Since(start))
 
 	// TODO: Parallelize traverseNodes + bufferedChannel? Don't think we'd have great speed up since building RTA is most time consuming
-	callChan := make(chan call)
-	calls := []call{}
+	callChan := make(chan FunCallInTest)
+	calls := []FunCallInTest{}
 
 	go func() {
 		for c := range callChan {
@@ -168,42 +168,60 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 	return nil
 }
 
-func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, parentTestTree []string, callChan chan<- call) {
+func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, parentTestTree []string, callChan chan<- FunCallInTest) {
 	for _, edge := range node.Out {
 		callee := edge.Callee
-		calleeFuncName := callee.Func.Name()
-		calleePkg := ""
-		if callee.Func.Pkg != nil {
-			calleePkg = callee.Func.Pkg.Pkg.Path()
-		} else if callee.Func.Signature.Recv() != nil {
-			// if Recv != nil, then it's stored as a first parameter
-			if callee.Func.Params[0].Object().Pkg() != nil {
-				// callee can have a receiver, but not be a part of a Pkg like error
-				calleePkg = callee.Func.Params[0].Object().Pkg().Path()
-			}
-		} else {
-			panic("unknown calleePkg")
-		}
+		funcName := callee.Func.Name()
+		pkg := getCalleesPkgPath(callee)
 
 		testTree := make([]string, len(parentTestTree))
 		copy(testTree, parentTestTree)
 
-		var childNode *callgraph.Node
+		if _, ok := edge.Site.(*ssa.Defer); ok {
+			traverseNodes(m, edge.Callee, testTree, callChan)
+			return
+		}
 
-		if calleePkg == "github.com/onsi/ginkgo" {
-			if calleeFuncName == "It" || calleeFuncName == "Context" {
-				call := edge.Site.Value()
-				args := call.Call.Args
+		var nodeToVisit *callgraph.Node
+
+		call := edge.Site.Value()
+		args := call.Call.Args
+
+		recv := ""
+		if callee.Func.Signature.Recv() != nil {
+			if ptr, ok := callee.Func.Params[0].Type().(*types.Pointer); ok {
+				recv = ptr.Elem().(*types.Named).Obj().Name()
+			} else if named, ok := callee.Func.Params[0].Type().(*types.Named); ok {
+				recv = named.Obj().Name()
+			} else if strct, ok := callee.Func.Params[0].Type().(*types.Struct); ok {
+				// error.Error()
+				recv = strct.Field(0).Name()
+			} else {
+				panic(".")
+			}
+		}
+
+		fcit := FunCallInTest{
+			Test: testTree,
+			Call: FuncCall{
+				Pkg:  pkg,
+				Recv: recv,
+				Func: funcName,
+				Args: argsToStrings(edge.Site.Common().Args),
+			},
+		}
+
+		if pkg == "github.com/onsi/ginkgo" {
+			if funcName == "It" || funcName == "Context" {
 				ginkgoDesc := ""
 
 				// arg0 can be const(string) or call(fmt.Sprintf)
-				if cnst, ok := args[0].(*ssa.Const); ok {
+				if ssaConst, ok := args[0].(*ssa.Const); ok {
 					// ginkgoDesc = cnst.Value.String()
-					ginkgoDesc = cnst.Value.ExactString()
-				} else if c, ok := args[0].(*ssa.Call); ok {
-					callName := c.Call.Value.Name()
-					if callName == "Sprintf" {
-						ginkgoDesc = c.Call.Args[0].(*ssa.Const).Value.String()
+					ginkgoDesc = ssaConst.Value.ExactString()
+				} else if ssaCall, ok := args[0].(*ssa.Call); ok {
+					if ssaCall.Call.Value.Name() == "Sprintf" {
+						ginkgoDesc = ssaCall.Call.Args[0].(*ssa.Const).Value.String()
 					} else {
 						panic("unknown args[0] call")
 					}
@@ -211,7 +229,7 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 					panic("unknown args[0] type")
 				}
 
-				f1, ok := call.Call.Args[1].(*ssa.MakeInterface)
+				f1, ok := args[1].(*ssa.MakeInterface)
 				if !ok {
 					panic(".")
 				}
@@ -227,43 +245,60 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 				var found bool
 				// Context/It("desc", func(){))
 				//              visit ^^^^^^^^ by setting childNode
-				childNode, found = m[f3]
+				nodeToVisit, found = m[f3]
 				if !found {
 					panic(".")
 				}
 				testTree = append(testTree, strings.ReplaceAll(ginkgoDesc, "\"", ""))
 			}
 		} else {
-			if strings.Contains(calleePkg, "github.com/openshift/client-go") ||
-				strings.Contains(calleePkg, "k8s.io/client-go") ||
-				strings.Contains(calleePkg, "k8s.io/apimachinery") ||
-				calleePkg == "github.com/openshift/origin/test/extended/util" {
-				// k8s.io/client-go/dynamic.Create("context.Background()", "new k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.Unstructured (complit)", "*t27", "nil:[]string")
+			if strings.Contains(pkg, "github.com/openshift/client-go") ||
+				strings.Contains(pkg, "k8s.io/client-go") ||
+				strings.Contains(pkg, "k8s.io/apimachinery") ||
+				pkg == "github.com/openshift/origin/test/extended/util" {
+				// Handle untyped clients like: k8s.io/client-go/dynamic.Create("context.Background()", "new k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.Unstructured (complit)", "*t27", "nil:[]string")
+				// Handle typed clients as well
 
-				// get recv
-				c := call{Test: testTree, Call: funcCall{Pkg: calleePkg, Func: calleeFuncName}}
-				for _, arg := range edge.Site.Common().Args {
-					c.Call.Args = append(c.Call.Args, arg.String())
-				}
-				callChan <- c
-				fmt.Printf("%#v\n", c)
+				// Store API call
+				callChan <- fcit
+				klog.V(3).Infof("%#v\n", fcit)
 
-			} else if strings.Contains(calleePkg, "k8s.io/kubernetes/test/e2e") ||
-				strings.Contains(calleePkg, "github.com/openshift/origin/test/") {
+			} else if strings.Contains(pkg, "k8s.io/kubernetes/test/e2e") || strings.Contains(pkg, "github.com/openshift/origin/test/") {
 				// go into the helper functions
-				childNode = callee
+				nodeToVisit = callee
 
 			} else {
-				c := call{Test: testTree, Call: funcCall{Pkg: calleePkg}, Ignored: true}
-				for _, arg := range edge.Site.Common().Args {
-					c.Call.Args = append(c.Call.Args, arg.String())
-				}
-				callChan <- c
+				// Store non-API call for debug purposes
+				fcit.Ignored = true
+				callChan <- fcit
 			}
 		}
 
-		if childNode != nil {
-			traverseNodes(m, childNode, testTree, callChan)
+		if nodeToVisit != nil {
+			traverseNodes(m, nodeToVisit, testTree, callChan)
 		}
 	}
+}
+
+func argsToStrings(args []ssa.Value) []string {
+	as := []string{}
+	for _, arg := range args {
+		as = append(as, arg.String())
+	}
+	return as
+}
+
+func getCalleesPkgPath(callee *callgraph.Node) string {
+	if callee.Func.Pkg != nil {
+		return callee.Func.Pkg.Pkg.Path()
+	} else if callee.Func.Signature.Recv() != nil {
+		// if Recv != nil, then it's stored as a first parameter
+		if callee.Func.Params[0].Object().Pkg() != nil {
+			// callee can have a receiver, but not be a part of a Pkg like error
+			return callee.Func.Params[0].Object().Pkg().Path()
+		}
+	} else {
+		panic("unknown calleePkg")
+	}
+	return ""
 }
