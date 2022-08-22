@@ -1,10 +1,10 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"strings"
 	"testing"
+	"time"
 
 	. "github.com/onsi/gomega"
 
@@ -15,6 +15,14 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
+// TODO: Handle cases like metav1, apimachinery, *CLI
+
+type APIUsage struct {
+	Test    []string
+	API     string
+	Ignored string // for reporting which pkgs were not considered  API
+}
+
 func TestPlay(t *testing.T) {
 	g := NewGomegaWithT(t)
 
@@ -24,22 +32,23 @@ func TestPlay(t *testing.T) {
 		Dir:   "/home/pm/dev/origin/",
 		Tests: true,
 	}
-	log.Printf("packages.Load - before\n")
+	log.Printf("packages.Load - start\n")
+	start := time.Now()
 	initial, err := packages.Load(&cfg, "./test/extended/apiserver/")
 	g.Expect(err).NotTo(HaveOccurred())
-	log.Printf("packages.Load - after\n")
+	log.Printf("packages.Load - end after %s\n", time.Since(start))
 
-	log.Printf("ssautil.AllPackages - before\n")
-	prog, pkgs := ssautil.AllPackages(initial, ssa.InstantiateGenerics) // ssa.PrintPackages
-	log.Printf("ssautil.AllPackages - after\n")
-	_ = pkgs
+	log.Printf("ssautil.AllPackages - start\n")
+	start = time.Now()
+	prog, _ := ssautil.AllPackages(initial, ssa.InstantiateGenerics) // ssa.PrintPackages
+	log.Printf("ssautil.AllPackages - end after %s\n", time.Since(start))
 
-	log.Printf("prog.Build - before\n")
+	log.Printf("prog.Build - start\n")
+	start = time.Now()
 	prog.Build()
-	log.Printf("prog.Build - after\n")
+	log.Printf("prog.Build - end after %s\n", time.Since(start))
 
 	fcm := map[string]*ssa.Function{}
-	fcs := []*ssa.Function{}
 
 	for _, p := range prog.AllPackages() {
 		if p != nil && strings.Contains(p.Pkg.Path(), "github.com/openshift/origin/test/extended/apiserver") {
@@ -56,29 +65,63 @@ func TestPlay(t *testing.T) {
 						g.Expect(cnst.Type().String()).To(Equal("string"))
 
 						anonFun := c.Call.Args[1].(*ssa.Function)
-						fcs = append(fcs, anonFun)
-						fcm[cnst.Value.String()] = anonFun
+						fcm[strings.ReplaceAll(cnst.Value.String(), "\"", "")] = anonFun
 					}
 				}
 			}
 		}
 	}
 
-	log.Printf("rta.Analyze - before\n")
+	fcs := make([]*ssa.Function, 0, len(fcm))
+	for _, f := range fcm {
+		fcs = append(fcs, f)
+	}
+
+	log.Printf("rta.Analyze - start\n")
+	start = time.Now()
 	rtaAnalysis := rta.Analyze(fcs, true)
-	log.Printf("rta.Analyze - after\n")
+	log.Printf("rta.Analyze - end after %s\n", time.Since(start))
 
+	// TODO: Parallelize traverseNodes + bufferedChannel? Don't think we'd have great speed up since building RTA is most time consuming
+	apiChan := make(chan APIUsage)
+	apiUsages := []APIUsage{}
+
+	go func() {
+		for api := range apiChan {
+			apiUsages = append(apiUsages, api)
+		}
+	}()
+
+	log.Printf("Traversing tests - start\n")
+	start = time.Now()
 	for desc, fun := range fcm {
-		fmt.Printf("%s - %s\n", desc, fun.Name())
-
 		node, found := rtaAnalysis.CallGraph.Nodes[fun]
 		g.Expect(found).To(BeTrue())
-
-		traverseNodes(rtaAnalysis.CallGraph.Nodes, node, desc, []string{}, 1)
+		traverseNodes(rtaAnalysis.CallGraph.Nodes, node, []string{desc}, apiChan)
 	}
+	log.Printf("Traversing tests - end after %s\n", time.Since(start))
+
+	ignored := map[string]struct{}{}
+	mergedApiUsage := map[string]map[string]struct{}{}
+	for _, au := range apiUsages {
+		if au.Ignored != "" {
+			ignored[au.Ignored] = struct{}{}
+		} else {
+			key := strings.Join(au.Test, " ")
+			if mergedApiUsage[key] == nil {
+				mergedApiUsage[key] = map[string]struct{}{}
+			}
+			mergedApiUsage[key][au.API] = struct{}{}
+		}
+	}
+
+	stop := 0
+	_ = stop
+
+	// apiUsages := map[string][]string
 }
 
-func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, parentTestName string, parentAPIcalls []string, lvl int) {
+func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, parentTestTree []string, apiChan chan<- APIUsage) {
 	for _, edge := range node.Out {
 		callee := edge.Callee
 		calleeFunc := callee.Func.Name()
@@ -95,7 +138,10 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 			panic("unknown calleePkg")
 		}
 
-		testName := parentTestName
+		// TODO: Check if can be improved (like slicing)
+		testTree := make([]string, len(parentTestTree))
+		copy(testTree, parentTestTree)
+
 		var childNode *callgraph.Node
 
 		if calleePkg == "github.com/onsi/ginkgo" {
@@ -106,7 +152,8 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 
 				// arg0 can be const(string) or call(fmt.Sprintf)
 				if cnst, ok := args[0].(*ssa.Const); ok {
-					ginkgoDesc = cnst.Value.String()
+					// ginkgoDesc = cnst.Value.String()
+					ginkgoDesc = cnst.Value.ExactString()
 				} else if c, ok := args[0].(*ssa.Call); ok {
 					callName := c.Call.Value.Name()
 					if callName == "Sprintf" {
@@ -131,34 +178,31 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 					panic(".")
 				}
 
-				fmt.Printf("+++ %s.%s (%s, %s)\n", calleePkg, calleeFunc, ginkgoDesc, f3.Name())
-
 				var found bool
+				// Context/It("desc", func(){))
+				//              visit ^^^^^^^^ by setting childNode
 				childNode, found = m[f3]
 				if !found {
 					panic(".")
 				}
-				testName += " " + ginkgoDesc
+				testTree = append(testTree, strings.ReplaceAll(ginkgoDesc, "\"", ""))
 			}
 		} else {
-			fmt.Printf("%s: %s.%s", parentTestName, calleePkg, calleeFunc)
-
 			if strings.Contains(calleePkg, "github.com/openshift/client-go") ||
 				strings.Contains(calleePkg, "k8s.io/client-go") ||
 				strings.Contains(calleePkg, "k8s.io/apimachinery") ||
 				calleePkg == "github.com/openshift/origin/test/extended/util" {
-				fmt.Printf("\t[API]")
-			}
-			if strings.Contains(calleePkg, "k8s.io/kubernetes/test/e2e") ||
+				apiChan <- APIUsage{Test: testTree, API: calleePkg}
+			} else if strings.Contains(calleePkg, "k8s.io/kubernetes/test/e2e") ||
 				strings.Contains(calleePkg, "github.com/openshift/origin/test/") {
 				childNode = callee
-				fmt.Printf("\tGOING DOWN")
+			} else {
+				apiChan <- APIUsage{Test: testTree, Ignored: calleePkg}
 			}
-			fmt.Printf("\n")
 		}
 
 		if childNode != nil {
-			traverseNodes(m, childNode, testName, parentAPIcalls, lvl+1)
+			traverseNodes(m, childNode, testTree, apiChan)
 		}
 	}
 }
