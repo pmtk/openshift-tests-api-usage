@@ -130,7 +130,6 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 	rtaAnalysis := rta.Analyze(fcs, true)
 	klog.V(2).Infof("rta.Analyze - end after %s\n", time.Since(start))
 
-	// TODO: Parallelize traverseNodes + bufferedChannel? Don't think we'd have great speed up since building RTA is most time consuming
 	callChan := make(chan FunCallInTest)
 	calls := []FunCallInTest{}
 
