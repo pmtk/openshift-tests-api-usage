@@ -182,8 +182,6 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 			return
 		}
 
-		var nodeToVisit *callgraph.Node
-
 		call := edge.Site.Value()
 		args := call.Call.Args
 
@@ -242,14 +240,14 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 					panic(".")
 				}
 
-				var found bool
 				// Context/It("desc", func(){))
 				//              visit ^^^^^^^^ by setting childNode
-				nodeToVisit, found = m[f3]
+				nodeToVisit, found := m[f3]
 				if !found {
 					panic(".")
 				}
 				testTree = append(testTree, strings.ReplaceAll(ginkgoDesc, "\"", ""))
+				traverseNodes(m, nodeToVisit, testTree, callChan)
 			}
 		} else {
 			if strings.Contains(pkg, "github.com/openshift/client-go") ||
@@ -265,17 +263,13 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 
 			} else if strings.Contains(pkg, "k8s.io/kubernetes/test/e2e") || strings.Contains(pkg, "github.com/openshift/origin/test/") {
 				// go into the helper functions
-				nodeToVisit = callee
+				traverseNodes(m, callee, testTree, callChan)
 
 			} else {
 				// Store non-API call for debug purposes
 				fcit.Ignored = true
 				callChan <- fcit
 			}
-		}
-
-		if nodeToVisit != nil {
-			traverseNodes(m, nodeToVisit, testTree, callChan)
 		}
 	}
 }
