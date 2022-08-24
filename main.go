@@ -204,7 +204,7 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 		}
 
 		if pkg == "github.com/onsi/ginkgo" {
-			if funcName == "It" || funcName == "Context" {
+			if funcName == "It" || funcName == "Context" || funcName == "Describe" {
 				args := edge.Site.Value().Call.Args
 
 				// Context/It("desc", func(){))
