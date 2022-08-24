@@ -172,8 +172,10 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 		copy(testTree, parentTestTree)
 
 		if _, ok := edge.Site.(*ssa.Defer); ok {
-			traverseNodes(m, edge.Callee, testTree, callChan)
-			return
+			if funcName != "GinkgoRecover" {
+				traverseNodes(m, edge.Callee, testTree, callChan)
+			}
+			continue
 		}
 
 		recv := ""
