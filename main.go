@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"go/token"
 	"go/types"
 	"io/fs"
 	"path/filepath"
@@ -15,11 +14,26 @@ import (
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
+
+	"k8s.io/apimachinery/pkg/util/sets"
 	klog "k8s.io/klog/v2"
 )
 
-// TODO: Transform API calls based on (Pkg, Recv, Func, Args) to get actual API used
 // TODO: Prepare final report: tests (It level) +APIs used
+
+var standardPackages map[string]struct{} = func() map[string]struct{} {
+	pkgs, err := packages.Load(nil, "std")
+	if err != nil {
+		panic(err)
+	}
+
+	result := make(map[string]struct{})
+	for _, p := range pkgs {
+		result[p.PkgPath] = struct{}{}
+	}
+
+	return result
+}()
 
 func main() {
 	klog.InitFlags(nil)
@@ -39,28 +53,20 @@ func main() {
 		return nil
 	})
 
-	klog.V(2).Infof("Pkgs (%v) to scan: %#v", len(pkgs), pkgs)
 	buildReportUsingRTA(originPath, pkgs)
 }
 
-// FunCallInTest is a function FunCallInTest in context of specific ginkgo node
-type FunCallInTest struct {
-	Test    []string // [Describe-Description, [Context-Description...], It-Description]
-	Call    FuncCall
-	Ignored bool // Ignored informs if function call is not API calls, but persisted for debugging purposes
+type APICallInTest struct {
+	Test []string // [Describe-Description, [Describe/Context-Description...], It-Description]
+	GVK  string
 }
 
-type FuncCall struct {
-	Pkg        string
-	Recv       string
-	Func       string
-	Args       []string
-	FuncDefPos token.Position
-}
-
-// TODO
-type report struct {
-	// Ignored
+type IgnoredCallInTest struct {
+	Test []string
+	Pkg  string
+	Recv string
+	Func string
+	Args []string
 }
 
 func buildReportUsingRTA(originPath string, pkgs []string) error {
@@ -69,23 +75,104 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 		Dir:   originPath,
 		Tests: true,
 	}
-	klog.V(2).Infof("packages.Load - start\n")
+
+	wipPkgs := []string{
+		"/home/pm/dev/origin/test/extended/adminack",
+		// "/home/pm/dev/origin/test/extended/apiserver",
+		// "/home/pm/dev/origin/test/extended/authentication",
+		// "/home/pm/dev/origin/test/extended/authorization",
+		// "/home/pm/dev/origin/test/extended/authorization/rbac",
+		// "/home/pm/dev/origin/test/extended/baremetal",
+		// "/home/pm/dev/origin/test/extended/bootstrap_user",
+		// "/home/pm/dev/origin/test/extended/builds",
+		// "/home/pm/dev/origin/test/extended/ci",
+		// "/home/pm/dev/origin/test/extended/cli",
+		// "/home/pm/dev/origin/test/extended/cluster",
+		// "/home/pm/dev/origin/test/extended/cluster/metrics",
+		// "/home/pm/dev/origin/test/extended/cmd",
+		// "/home/pm/dev/origin/test/extended/controller_manager",
+		// "/home/pm/dev/origin/test/extended/coreos",
+		// "/home/pm/dev/origin/test/extended/crdvalidation",
+		// "/home/pm/dev/origin/test/extended/csrapprover",
+		// "/home/pm/dev/origin/test/extended/deployments",
+		// "/home/pm/dev/origin/test/extended/dns",
+		// "/home/pm/dev/origin/test/extended/dr",
+		// "/home/pm/dev/origin/test/extended/etcd",
+		// "/home/pm/dev/origin/test/extended/etcd/helpers",
+		// "/home/pm/dev/origin/test/extended/idling",
+		// "/home/pm/dev/origin/test/extended/image_ecosystem",
+		// "/home/pm/dev/origin/test/extended/imageapis",
+		// "/home/pm/dev/origin/test/extended/images",
+		// "/home/pm/dev/origin/test/extended/images/trigger",
+		// "/home/pm/dev/origin/test/extended/jobs",
+		// "/home/pm/dev/origin/test/extended/machines",
+		// "/home/pm/dev/origin/test/extended/networking",
+		// "/home/pm/dev/origin/test/extended/oauth",
+		// "/home/pm/dev/origin/test/extended/olm",
+		// "/home/pm/dev/origin/test/extended/operators",
+		// "/home/pm/dev/origin/test/extended/pods",
+		// "/home/pm/dev/origin/test/extended/project",
+		// "/home/pm/dev/origin/test/extended/prometheus",
+		// "/home/pm/dev/origin/test/extended/prometheus/client",
+		// "/home/pm/dev/origin/test/extended/quota",
+		// "/home/pm/dev/origin/test/extended/router",
+		// "/home/pm/dev/origin/test/extended/router/certgen",
+		// "/home/pm/dev/origin/test/extended/router/grpc-interop",
+		// "/home/pm/dev/origin/test/extended/router/h2spec",
+		// "/home/pm/dev/origin/test/extended/router/shard",
+		// "/home/pm/dev/origin/test/extended/scheduling",
+		// "/home/pm/dev/origin/test/extended/scheme",
+		// "/home/pm/dev/origin/test/extended/security",
+		// "/home/pm/dev/origin/test/extended/single_node",
+		// "/home/pm/dev/origin/test/extended/tbr_health",
+		// "/home/pm/dev/origin/test/extended/templates",
+		// "/home/pm/dev/origin/test/extended/templates/openservicebroker",
+		// "/home/pm/dev/origin/test/extended/templates/openservicebroker/api",
+		// "/home/pm/dev/origin/test/extended/templates/openservicebroker/client",
+		// "/home/pm/dev/origin/test/extended/user",
+		// "/home/pm/dev/origin/test/extended/util",
+		// "/home/pm/dev/origin/test/extended/util/alibabacloud",
+		// "/home/pm/dev/origin/test/extended/util/annotate",
+		// "/home/pm/dev/origin/test/extended/util/annotate/generated",
+		// "/home/pm/dev/origin/test/extended/util/azure",
+		// "/home/pm/dev/origin/test/extended/util/baremetal",
+		// "/home/pm/dev/origin/test/extended/util/cluster",
+		// "/home/pm/dev/origin/test/extended/util/db",
+		// "/home/pm/dev/origin/test/extended/util/disruption",
+		// "/home/pm/dev/origin/test/extended/util/disruption/controlplane",
+		// "/home/pm/dev/origin/test/extended/util/disruption/frontends",
+		// "/home/pm/dev/origin/test/extended/util/disruption/imageregistry",
+		// "/home/pm/dev/origin/test/extended/util/ibmcloud",
+		// "/home/pm/dev/origin/test/extended/util/image",
+		// "/home/pm/dev/origin/test/extended/util/imageregistryutil",
+		// "/home/pm/dev/origin/test/extended/util/jenkins",
+		// "/home/pm/dev/origin/test/extended/util/kubevirt",
+		// "/home/pm/dev/origin/test/extended/util/nutanix",
+		// "/home/pm/dev/origin/test/extended/util/oauthserver",
+		// "/home/pm/dev/origin/test/extended/util/oauthserver/tokencmd",
+		// "/home/pm/dev/origin/test/extended/util/openshift",
+		// "/home/pm/dev/origin/test/extended/util/openshift/clusterversionoperator",
+		// "/home/pm/dev/origin/test/extended/util/operator",
+		// "/home/pm/dev/origin/test/extended/util/ovirt",
+		// "/home/pm/dev/origin/test/extended/util/prometheus",
+		// "/home/pm/dev/origin/test/extended/util/url",
+	}
+
+	klog.V(2).Infof("Pkgs (%v) to scan: %#v", len(wipPkgs), wipPkgs)
 	start := time.Now()
-	initial, err := packages.Load(&cfg, "./test/extended/apiserver/") // pkgs...
+	initial, err := packages.Load(&cfg, wipPkgs...) // pkgs...
 	if err != nil {
 		return fmt.Errorf("packages.Load failed: %w", err)
 	}
-	klog.V(2).Infof("packages.Load - end after %s\n", time.Since(start))
+	klog.V(2).Infof("packages.Load done in %s\n", time.Since(start))
 
-	klog.V(2).Infof("ssautil.AllPackages - start\n")
 	start = time.Now()
 	prog, _ := ssautil.AllPackages(initial, ssa.InstantiateGenerics)
-	klog.V(2).Infof("ssautil.AllPackages - end after %s\n", time.Since(start))
+	klog.V(2).Infof("ssautil.AllPackages done in %s\n", time.Since(start))
 
-	klog.V(2).Infof("prog.Build - start\n")
 	start = time.Now()
 	prog.Build()
-	klog.V(2).Infof("prog.Build - end after %s\n", time.Since(start))
+	klog.V(2).Infof("prog.Build done in %s\n", time.Since(start))
 
 	fcm := map[string]*ssa.Function{}
 
@@ -119,17 +206,30 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 		fcs = append(fcs, f)
 	}
 
-	klog.V(2).Infof("rta.Analyze - start\n")
 	start = time.Now()
 	rtaAnalysis := rta.Analyze(fcs, true)
-	klog.V(2).Infof("rta.Analyze - end after %s\n", time.Since(start))
+	klog.V(2).Infof("rta.Analyze done in %s\n", time.Since(start))
 
-	callChan := make(chan FunCallInTest)
-	calls := []FunCallInTest{}
+	apiChan := make(chan APICallInTest)
+	apiCalls := []APICallInTest{}
+
+	ignoredChan := make(chan IgnoredCallInTest)
+	ignoredCalls := []IgnoredCallInTest{}
 
 	go func() {
-		for c := range callChan {
-			calls = append(calls, c)
+		for {
+			select {
+			case c, ok := <-apiChan:
+				if !ok {
+					return
+				}
+				apiCalls = append(apiCalls, c)
+			case c, ok := <-ignoredChan:
+				if !ok {
+					return
+				}
+				ignoredCalls = append(ignoredCalls, c)
+			}
 		}
 	}()
 
@@ -141,28 +241,71 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 			return fmt.Errorf("couldn't find %s (%s) in rtaAnalysis.CallGraph.Nodes[]", fun.Name(), desc)
 		}
 		klog.V(2).Infof("Inspecting test: %s", desc)
-		traverseNodes(rtaAnalysis.CallGraph.Nodes, node, []string{desc}, callChan)
+		traverseNodes(rtaAnalysis.CallGraph.Nodes, node, []string{desc}, apiChan, ignoredChan)
 	}
-	klog.V(2).Infof("Traversing tests - end after %s\n", time.Since(start))
+	klog.V(2).Infof("Traversing tests - done in %s\n", time.Since(start))
+	close(apiChan)
+	close(ignoredChan)
 
-	ignored := map[string]struct{}{}
-	mergedApiUsage := map[string]map[string]struct{}{}
-	for _, c := range calls {
-		if c.Ignored {
-			ignored[c.Call.Pkg] = struct{}{}
-		} else {
-			key := strings.Join(c.Test, " ")
-			if mergedApiUsage[key] == nil {
-				mergedApiUsage[key] = map[string]struct{}{}
-			}
-			mergedApiUsage[key][c.Call.Pkg] = struct{}{}
-		}
+	for _, c := range apiCalls {
+		fmt.Printf("API: %s -> %s\n", strings.Join(c.Test, " "), c.GVK)
+	}
+
+	fmt.Printf("\n\n\n")
+
+	for _, c := range ignoredCalls {
+		fmt.Printf("IGNORED: (%s.%s).%s()\n", c.Pkg, c.Recv, c.Func)
 	}
 
 	return nil
 }
 
-func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, parentTestTree []string, callChan chan<- FunCallInTest) {
+var expectedMethods = []string{
+	"Create",
+	"Update",
+	// "UpdateStatus",
+	"Delete",
+	"DeleteCollection",
+	"Get",
+	"List",
+	"Watch",
+	"Patch",
+	// "Apply",
+	// "ApplyStatus",
+}
+
+func checkIfClientGoInterface(n *types.Named) bool {
+	methods := sets.String{}
+	for i := 0; i < n.NumMethods(); i++ {
+		methods.Insert(n.Method(i).Name())
+	}
+	return methods.HasAll(expectedMethods...)
+}
+
+func getRecvFromFunc(f *ssa.Function) (*types.Named, string) {
+	if f.Signature.Recv() == nil {
+		return nil, ""
+	}
+
+	arg0type := f.Params[0].Type()
+
+	if ptr, ok := arg0type.(*types.Pointer); ok {
+		return ptr.Elem().(*types.Named), ptr.Elem().(*types.Named).Obj().Name()
+
+	} else if named, ok := arg0type.(*types.Named); ok {
+		return named, named.Obj().Name()
+
+	} else if strct, ok := arg0type.(*types.Struct); ok {
+		return nil, strct.Field(0).Name()
+
+	} else {
+		panic("investigate arg0type type")
+	}
+}
+
+func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, parentTestTree []string,
+	apiChan chan<- APICallInTest, ignoreChan chan<- IgnoredCallInTest) {
+
 	for _, edge := range node.Out {
 		callee := edge.Callee
 		funcName := callee.Func.Name()
@@ -173,34 +316,9 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 
 		if _, ok := edge.Site.(*ssa.Defer); ok {
 			if funcName != "GinkgoRecover" {
-				traverseNodes(m, edge.Callee, testTree, callChan)
+				traverseNodes(m, edge.Callee, testTree, apiChan, ignoreChan)
 			}
 			continue
-		}
-
-		recv := ""
-		if callee.Func.Signature.Recv() != nil {
-			if ptr, ok := callee.Func.Params[0].Type().(*types.Pointer); ok {
-				recv = ptr.Elem().(*types.Named).Obj().Name()
-			} else if named, ok := callee.Func.Params[0].Type().(*types.Named); ok {
-				recv = named.Obj().Name()
-			} else if strct, ok := callee.Func.Params[0].Type().(*types.Struct); ok {
-				// error.Error()
-				recv = strct.Field(0).Name()
-			} else {
-				panic("callee.Func.Params[0].Type() - unknown type")
-			}
-		}
-
-		fcit := FunCallInTest{
-			Test: testTree,
-			Call: FuncCall{
-				Pkg:        pkg,
-				Recv:       recv,
-				Func:       funcName,
-				Args:       argsToStrings(edge.Site.Common().Args),
-				FuncDefPos: callee.Func.Prog.Fset.Position(callee.Func.Pos()),
-			},
 		}
 
 		if pkg == "github.com/onsi/ginkgo" {
@@ -217,30 +335,62 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 
 				ginkgoDesc := getStringFromValue(args[0])
 				testTree = append(testTree, strings.ReplaceAll(ginkgoDesc, "\"", ""))
-				traverseNodes(m, nodeToVisit, testTree, callChan)
+				traverseNodes(m, nodeToVisit, testTree, apiChan, ignoreChan)
 			}
-		} else {
-			if strings.Contains(pkg, "github.com/openshift/client-go") ||
-				strings.Contains(pkg, "k8s.io/client-go/dynamic") ||
-				//strings.Contains(pkg, "k8s.io/apimachinery") ||
-				pkg == "github.com/openshift/origin/test/extended/util" {
-				// TODO Handle untyped clients like: k8s.io/client-go/dynamic.Create("context.Background()", "new k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.Unstructured (complit)", "*t27", "nil:[]string")
-				// TODO Handle typed clients as well
 
-				// Store API call
-				callChan <- fcit
-				// klog.V(3).Infof("%#v\n", fcit)
+		} else if strings.Contains(pkg, "k8s.io/client-go/dynamic") {
+		} else if strings.Contains(pkg, "github.com/openshift/client-go") ||
+			strings.Contains(pkg, "k8s.io/client-go") {
 
-			} else if strings.Contains(pkg, "k8s.io/kubernetes/test/e2e") || strings.Contains(pkg, "github.com/openshift/origin/test/") {
-				// go into the helper functions
-				if edge.Callee != edge.Caller {
-					traverseNodes(m, callee, testTree, callChan)
+			recv, _ := getRecvFromFunc(callee.Func)
+			if recv == nil {
+				klog.Infof("recv for openshift-clientgo is nil")
+				continue
+			}
+
+			if checkIfClientGoInterface(recv) {
+				for i := 0; i < recv.NumMethods(); i++ {
+					if recv.Method(i).Name() == "Get" {
+						obj := recv.Method(i).Type().(*types.Signature).Results().At(0).Type().(*types.Pointer).Elem().(*types.Named).Obj()
+						gvk := fmt.Sprintf("%s.%s", obj.Pkg().Path(), obj.Name())
+						apiChan <- APICallInTest{
+							Test: testTree,
+							GVK:  gvk,
+						}
+					}
 				}
+			}
 
-			} else {
-				// Store non-API call for debug purposes
-				fcit.Ignored = true
-				callChan <- fcit
+		} else if pkg == "github.com/openshift/origin/test/extended/util" {
+
+			recv, recvName := getRecvFromFunc(callee.Func)
+			stop := 0
+			_ = stop
+			_ = recv
+			_ = recvName
+			// TODO Handle only Run()...
+
+			// strings.Contains(pkg, "k8s.io/apimachinery") ||
+			// TODO Handle untyped clients like: k8s.io/client-go/dynamic.Create("context.Background()", "new k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.Unstructured (complit)", "*t27", "nil:[]string")
+			// TODO Handle typed clients as well
+
+		} else if strings.Contains(pkg, "k8s.io/kubernetes/test/e2e") || strings.Contains(pkg, "github.com/openshift/origin/test/") {
+			// go into the helper functions but avoid recursion
+			if edge.Callee != edge.Caller {
+				traverseNodes(m, callee, testTree, apiChan, ignoreChan)
+			}
+
+		} else {
+			if _, found := standardPackages[pkg]; !found {
+				// store ignored calls for debug purposes
+				_, recvName := getRecvFromFunc(callee.Func)
+				ignoreChan <- IgnoredCallInTest{
+					Test: testTree,
+					Pkg:  pkg,
+					Recv: recvName,
+					Func: funcName,
+					Args: argsToStrings(edge.Site.Common().Args),
+				}
 			}
 		}
 	}
@@ -326,8 +476,7 @@ func getStringFromValue(v ssa.Value) string {
 
 	case *ssa.BinOp:
 		// It("test/cmd/"+currFilename, ...)
-		stop := 0
-		_ = stop
+		panic("getStringFromValue: *ssa.BinOp")
 	}
 
 	panic(fmt.Sprintf("getStringFromValue: v's type in unexpected: %T", v))
