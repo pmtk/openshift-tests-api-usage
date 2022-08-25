@@ -319,7 +319,12 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 			}
 
 		} else if pkg == "github.com/openshift/origin/test/extended/util" {
-			// TODO Handle only Run()...
+			// *CLI[.AsAdmin()].Run().Args().Output()
+			// *CLI[.AsAdmin()].Run().Args().Execute()
+			// *CLI[.AsAdmin()].Run().Args().Background()
+			// other util helper functions - go in
+
+			// [Admin]KubeClient(), UserConfig(), AdminConfig() - ignore and just check following func calls
 			recv, recvName := getRecvFromFunc(callee.Func)
 			stop := 0
 			_ = stop
