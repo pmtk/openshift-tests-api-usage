@@ -19,8 +19,6 @@ import (
 	klog "k8s.io/klog/v2"
 )
 
-// TODO: Prepare final report: tests (It level) +APIs used
-
 var standardPackages map[string]struct{} = func() map[string]struct{} {
 	pkgs, err := packages.Load(nil, "std")
 	if err != nil {
@@ -53,30 +51,8 @@ func main() {
 		return nil
 	})
 
-	buildReportUsingRTA(originPath, pkgs)
-}
-
-type APICallInTest struct {
-	Test []string // [Describe-Description, [Describe/Context-Description...], It-Description]
-	GVK  string
-}
-
-type IgnoredCallInTest struct {
-	Test []string
-	Pkg  string
-	Recv string
-	Func string
-	Args []string
-}
-
-func buildReportUsingRTA(originPath string, pkgs []string) error {
-	cfg := packages.Config{
-		Mode:  packages.LoadAllSyntax,
-		Dir:   originPath,
-		Tests: true,
-	}
-
-	wipPkgs := []string{
+	// TESTING
+	pkgs = []string{
 		"/home/pm/dev/origin/test/extended/adminack",
 		// "/home/pm/dev/origin/test/extended/apiserver",
 		// "/home/pm/dev/origin/test/extended/authentication",
@@ -158,15 +134,41 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 		// "/home/pm/dev/origin/test/extended/util/url",
 	}
 
-	klog.V(2).Infof("Pkgs (%v) to scan: %#v", len(wipPkgs), wipPkgs)
+	buildReportUsingRTA(originPath, pkgs)
+}
+
+type APICallInTest struct {
+	Test []string // [Describe-Description, [Describe/Context-Description...], It-Description]
+	GVK  string
+}
+
+type IgnoredCallInTest struct {
+	Test []string
+	Pkg  string
+	Recv string
+	Func string
+	Args []string
+}
+
+func buildReportUsingRTA(originPath string, pkgs []string) error {
+	cfg := packages.Config{
+		Mode:  packages.LoadAllSyntax,
+		Dir:   originPath,
+		Tests: true,
+	}
+
+	klog.V(2).Infof("Pkgs (%v) to scan: %#v", len(pkgs), pkgs)
+
 	start := time.Now()
-	initial, err := packages.Load(&cfg, wipPkgs...) // pkgs...
+	// Load packages into a memory with their Abstract Syntax Trees (stored in Syntax member)
+	initial, err := packages.Load(&cfg, pkgs...)
 	if err != nil {
 		return fmt.Errorf("packages.Load failed: %w", err)
 	}
 	klog.V(2).Infof("packages.Load done in %s\n", time.Since(start))
 
 	start = time.Now()
+	// Build a Single Static Assignment (SSA) form of packages
 	prog, _ := ssautil.AllPackages(initial, ssa.InstantiateGenerics)
 	klog.V(2).Infof("ssautil.AllPackages done in %s\n", time.Since(start))
 
@@ -174,8 +176,10 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 	prog.Build()
 	klog.V(2).Infof("prog.Build done in %s\n", time.Since(start))
 
+	// Go through packages from github.com/openshift/origin/test/extended/ and look for init.start block which contains
+	// variables created during init such as `var _ = ginkgo.Describe("DESC", func() {...})`.
+	// Store their description and pointer to the `func() {...}`.
 	fcm := map[string]*ssa.Function{}
-
 	for _, p := range prog.AllPackages() {
 		if p != nil && strings.Contains(p.Pkg.Path(), "github.com/openshift/origin/test/extended/") {
 			init := p.Members["init"].(*ssa.Function)
@@ -207,15 +211,16 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 	}
 
 	start = time.Now()
+	// Perform a Rapid Type Analysis (RTA) for given functions. This will build a call graph as well.
+	// This can even lasts about 5 minutes or more (depends on how many packages we want to analyze).
 	rtaAnalysis := rta.Analyze(fcs, true)
 	klog.V(2).Infof("rta.Analyze done in %s\n", time.Since(start))
 
+	// Go routine for simple function calls within tests receival instead of returning the results via `return` and merging them in a recursive function.
 	apiChan := make(chan APICallInTest)
 	apiCalls := []APICallInTest{}
-
-	ignoredChan := make(chan IgnoredCallInTest)
+	ignoredChan := make(chan IgnoredCallInTest) // Ignored calls are persisted for debugging
 	ignoredCalls := []IgnoredCallInTest{}
-
 	go func() {
 		for {
 			select {
@@ -233,6 +238,7 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 		}
 	}()
 
+	// Go through previously stored list of functions given to ginkgo.Describe and traverse their call graph.
 	klog.V(2).Infof("Traversing %d tests - start\n", len(fcm))
 	start = time.Now()
 	for desc, fun := range fcm {
@@ -260,52 +266,11 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 	return nil
 }
 
-var expectedMethods = []string{
-	"Create",
-	"Update",
-	// "UpdateStatus",
-	"Delete",
-	"DeleteCollection",
-	"Get",
-	"List",
-	"Watch",
-	"Patch",
-	// "Apply",
-	// "ApplyStatus",
-}
-
-func checkIfClientGoInterface(n *types.Named) bool {
-	methods := sets.String{}
-	for i := 0; i < n.NumMethods(); i++ {
-		methods.Insert(n.Method(i).Name())
-	}
-	return methods.HasAll(expectedMethods...)
-}
-
-func getRecvFromFunc(f *ssa.Function) (*types.Named, string) {
-	if f.Signature.Recv() == nil {
-		return nil, ""
-	}
-
-	arg0type := f.Params[0].Type()
-
-	if ptr, ok := arg0type.(*types.Pointer); ok {
-		return ptr.Elem().(*types.Named), ptr.Elem().(*types.Named).Obj().Name()
-
-	} else if named, ok := arg0type.(*types.Named); ok {
-		return named, named.Obj().Name()
-
-	} else if strct, ok := arg0type.(*types.Struct); ok {
-		return nil, strct.Field(0).Name()
-
-	} else {
-		panic("investigate arg0type type")
-	}
-}
-
 func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, parentTestTree []string,
 	apiChan chan<- APICallInTest, ignoreChan chan<- IgnoredCallInTest) {
 
+	// node represents specific function within a call graph
+	// this function makes a function calls represented as edges
 	for _, edge := range node.Out {
 		callee := edge.Callee
 		funcName := callee.Func.Name()
@@ -314,6 +279,7 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 		testTree := make([]string, len(parentTestTree))
 		copy(testTree, parentTestTree)
 
+		// let's go into Defers only if they're not GinkgoRecover
 		if _, ok := edge.Site.(*ssa.Defer); ok {
 			if funcName != "GinkgoRecover" {
 				traverseNodes(m, edge.Callee, testTree, apiChan, ignoreChan)
@@ -321,12 +287,14 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 			continue
 		}
 
+		// if function call is ginkgo.Context/Describe/It then
+		// we want to get its description
+		// Context/It("desc", func(){))
+		//          and visit ^^^^^^^^
 		if pkg == "github.com/onsi/ginkgo" {
-			if funcName == "It" || funcName == "Context" || funcName == "Describe" {
+			if funcName == "Context" || funcName == "Describe" || funcName == "It" {
 				args := edge.Site.Value().Call.Args
 
-				// Context/It("desc", func(){))
-				//              visit ^^^^^^^^ by setting childNode
 				f := getFuncFromValue(args[1])
 				nodeToVisit, found := m[f]
 				if !found {
@@ -339,6 +307,7 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 			}
 
 		} else if strings.Contains(pkg, "k8s.io/client-go/dynamic") {
+			// TODO Handle untyped clients like: k8s.io/client-go/dynamic.Create("context.Background()", "new k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.Unstructured (complit)", "*t27", "nil:[]string")
 		} else if strings.Contains(pkg, "github.com/openshift/client-go") ||
 			strings.Contains(pkg, "k8s.io/client-go") {
 
@@ -369,10 +338,6 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 			_ = recv
 			_ = recvName
 			// TODO Handle only Run()...
-
-			// strings.Contains(pkg, "k8s.io/apimachinery") ||
-			// TODO Handle untyped clients like: k8s.io/client-go/dynamic.Create("context.Background()", "new k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.Unstructured (complit)", "*t27", "nil:[]string")
-			// TODO Handle typed clients as well
 
 		} else if strings.Contains(pkg, "k8s.io/kubernetes/test/e2e") || strings.Contains(pkg, "github.com/openshift/origin/test/") {
 			// go into the helper functions but avoid recursion
@@ -480,4 +445,54 @@ func getStringFromValue(v ssa.Value) string {
 	}
 
 	panic(fmt.Sprintf("getStringFromValue: v's type in unexpected: %T", v))
+}
+
+var expectedMethods = []string{
+	"Create",
+	"Update",
+	// "UpdateStatus",
+	"Delete",
+	"DeleteCollection",
+	"Get",
+	"List",
+	"Watch",
+	"Patch",
+	// "Apply",
+	// "ApplyStatus",
+}
+
+// checkIfClientGoInterface checks given types.Named if its methods are intersecting with a set of methods that client-go interface should have
+func checkIfClientGoInterface(n *types.Named) bool {
+	methods := sets.String{}
+	for i := 0; i < n.NumMethods(); i++ {
+		methods.Insert(n.Method(i).Name())
+	}
+	return methods.HasAll(expectedMethods...)
+}
+
+// getRecvFromFunc tries to get the receiver object and/or its name from given ssa.Function
+func getRecvFromFunc(f *ssa.Function) (*types.Named, string) {
+	if f.Signature.Recv() == nil {
+		return nil,
+			""
+	}
+
+	arg0type := f.Params[0].Type()
+
+	if ptr, ok := arg0type.(*types.Pointer); ok {
+		return ptr.Elem().(*types.Named),
+			ptr.Elem().(*types.Named).Obj().Name()
+
+	} else if named, ok := arg0type.(*types.Named); ok {
+		return named,
+			named.Obj().Name()
+
+	} else if strct, ok := arg0type.(*types.Struct); ok {
+		// some structure embedded some `error` and Error() was called
+		return nil,
+			strct.Field(0).Name()
+
+	} else {
+		panic("investigate arg0type type")
+	}
 }
