@@ -19,19 +19,7 @@ import (
 	klog "k8s.io/klog/v2"
 )
 
-var standardPackages map[string]struct{} = func() map[string]struct{} {
-	pkgs, err := packages.Load(nil, "std")
-	if err != nil {
-		panic(err)
-	}
-
-	result := make(map[string]struct{})
-	for _, p := range pkgs {
-		result[p.PkgPath] = struct{}{}
-	}
-
-	return result
-}()
+// TODO: Report as a file
 
 func main() {
 	klog.InitFlags(nil)
@@ -179,10 +167,10 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 	// Go through packages from github.com/openshift/origin/test/extended/ and look for init.start block which contains
 	// variables created during init such as `var _ = ginkgo.Describe("DESC", func() {...})`.
 	// Store their description and pointer to the `func() {...}`.
-	fcm := map[string]*ssa.Function{}
-	for _, p := range prog.AllPackages() {
-		if p != nil && strings.Contains(p.Pkg.Path(), "github.com/openshift/origin/test/extended/") {
-			init := p.Members["init"].(*ssa.Function)
+	describeFuncs := map[string]*ssa.Function{}
+	for _, pkg := range prog.AllPackages() {
+		if pkg != nil && strings.Contains(pkg.Pkg.Path(), "github.com/openshift/origin/test/extended/") {
+			init := pkg.Members["init"].(*ssa.Function)
 			initStart := init.Blocks[1] // "init.start"
 
 			for _, instr := range initStart.Instrs {
@@ -197,7 +185,7 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 								return fmt.Errorf("expected cnst.Type() to be string: %#v", cnst.Type())
 							}
 							anonFun := c.Call.Args[1].(*ssa.Function)
-							fcm[strings.ReplaceAll(cnst.Value.String(), "\"", "")] = anonFun
+							describeFuncs[strings.ReplaceAll(cnst.Value.String(), "\"", "")] = anonFun
 						}
 					}
 				}
@@ -205,15 +193,15 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 		}
 	}
 
-	fcs := make([]*ssa.Function, 0, len(fcm))
-	for _, f := range fcm {
-		fcs = append(fcs, f)
+	describeFuncsSlice := make([]*ssa.Function, 0, len(describeFuncs))
+	for _, fun := range describeFuncs {
+		describeFuncsSlice = append(describeFuncsSlice, fun)
 	}
 
 	start = time.Now()
 	// Perform a Rapid Type Analysis (RTA) for given functions. This will build a call graph as well.
 	// This can even lasts about 5 minutes or more (depends on how many packages we want to analyze).
-	rtaAnalysis := rta.Analyze(fcs, true)
+	rtaAnalysis := rta.Analyze(describeFuncsSlice, true)
 	klog.V(2).Infof("rta.Analyze done in %s\n", time.Since(start))
 
 	// Go routine for simple function calls within tests receival instead of returning the results via `return` and merging them in a recursive function.
@@ -239,9 +227,9 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 	}()
 
 	// Go through previously stored list of functions given to ginkgo.Describe and traverse their call graph.
-	klog.V(2).Infof("Traversing %d tests - start\n", len(fcm))
+	klog.V(2).Infof("Traversing %d tests - start\n", len(describeFuncs))
 	start = time.Now()
-	for desc, fun := range fcm {
+	for desc, fun := range describeFuncs {
 		node, found := rtaAnalysis.CallGraph.Nodes[fun]
 		if !found {
 			return fmt.Errorf("couldn't find %s (%s) in rtaAnalysis.CallGraph.Nodes[]", fun.Name(), desc)
@@ -253,6 +241,7 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 	close(apiChan)
 	close(ignoredChan)
 
+	// Just some testing purposes print out
 	for _, c := range apiCalls {
 		fmt.Printf("API: %s -> %s\n", strings.Join(c.Test, " "), c.GVK)
 	}
@@ -308,9 +297,8 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 
 		} else if strings.Contains(pkg, "k8s.io/client-go/dynamic") {
 			// TODO Handle untyped clients like: k8s.io/client-go/dynamic.Create("context.Background()", "new k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.Unstructured (complit)", "*t27", "nil:[]string")
-		} else if strings.Contains(pkg, "github.com/openshift/client-go") ||
-			strings.Contains(pkg, "k8s.io/client-go") {
 
+		} else if strings.Contains(pkg, "github.com/openshift/client-go") || strings.Contains(pkg, "k8s.io/client-go") {
 			recv, _ := getRecvFromFunc(callee.Func)
 			if recv == nil {
 				klog.Infof("recv for openshift-clientgo is nil")
@@ -331,13 +319,12 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 			}
 
 		} else if pkg == "github.com/openshift/origin/test/extended/util" {
-
+			// TODO Handle only Run()...
 			recv, recvName := getRecvFromFunc(callee.Func)
 			stop := 0
 			_ = stop
 			_ = recv
 			_ = recvName
-			// TODO Handle only Run()...
 
 		} else if strings.Contains(pkg, "k8s.io/kubernetes/test/e2e") || strings.Contains(pkg, "github.com/openshift/origin/test/") {
 			// go into the helper functions but avoid recursion
@@ -360,6 +347,20 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 		}
 	}
 }
+
+var standardPackages = func() map[string]struct{} {
+	pkgs, err := packages.Load(nil, "std")
+	if err != nil {
+		panic(err)
+	}
+
+	result := make(map[string]struct{})
+	for _, p := range pkgs {
+		result[p.PkgPath] = struct{}{}
+	}
+
+	return result
+}()
 
 func argsToStrings(args []ssa.Value) []string {
 	as := []string{}
@@ -473,8 +474,7 @@ func checkIfClientGoInterface(n *types.Named) bool {
 // getRecvFromFunc tries to get the receiver object and/or its name from given ssa.Function
 func getRecvFromFunc(f *ssa.Function) (*types.Named, string) {
 	if f.Signature.Recv() == nil {
-		return nil,
-			""
+		return nil, ""
 	}
 
 	arg0type := f.Params[0].Type()
