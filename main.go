@@ -157,7 +157,7 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 
 	start = time.Now()
 	// Build a Single Static Assignment (SSA) form of packages
-	prog, _ := ssautil.AllPackages(initial, ssa.InstantiateGenerics)
+	prog, _ := ssautil.AllPackages(initial, ssa.InstantiateGenerics|ssa.GlobalDebug)
 	klog.V(2).Infof("ssautil.AllPackages done in %s\n", time.Since(start))
 
 	start = time.Now()
@@ -296,12 +296,50 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 			}
 
 		} else if strings.Contains(pkg, "k8s.io/client-go/dynamic") {
-			// TODO Handle untyped clients like: k8s.io/client-go/dynamic.Create("context.Background()", "new k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.Unstructured (complit)", "*t27", "nil:[]string")
+			// TODO Handle all cases for unstructured.Unstructured from origin
+			_, recvName := getRecvFromFunc(callee.Func)
+			klog.Infof("dynamic: recv:%s   func:%s   args:%v", recvName, funcName, argsToStrings(edge.Site.Common().Args))
+			if funcName == "Resource" {
+				// Couldn't find a way to get concrete string args for this call from the call graph itself
+				// and reported recv's name was not matching what is in code
+				// so going through Caller func AST and getting all (k8s.io/client-go/dynamic.Interface).Resource(GVK) that can be found
+				// they will be deduplicated when doing a final report
+				// Also: assuming that creating a dynamic ResourceInterface client means using that API
+
+				var body *ast.BlockStmt
+				if fDecl, ok := edge.Caller.Func.Syntax().(*ast.FuncDecl); ok {
+					body = fDecl.Body
+				} else if fLit, ok := edge.Caller.Func.Syntax().(*ast.FuncLit); ok {
+					body = fLit.Body
+				} else {
+					panic("unknown Func")
+				}
+
+				for _, stmt := range body.List {
+					if assignStmt, ok := stmt.(*ast.AssignStmt); ok {
+						if len(assignStmt.Rhs) == 1 {
+							if ce, ok := assignStmt.Rhs[0].(*ast.CallExpr); ok {
+								if selExpr, ok := ce.Fun.(*ast.SelectorExpr); ok {
+									if selExpr.Sel.Name == "Resource" && ce.Args[0].(*ast.CompositeLit).Type.(*ast.SelectorExpr).Sel.Name == "GroupVersionResource" {
+										get := func(i int) string {
+											return ce.Args[0].(*ast.CompositeLit).Elts[i].(*ast.KeyValueExpr).Value.(*ast.BasicLit).Value
+										}
+										gvk := fmt.Sprintf("%s/%s.%s", strings.ReplaceAll(get(0), "\"", ""), strings.ReplaceAll(get(2), "\"", ""), strings.ReplaceAll(get(1), "\"", ""))
+										apiChan <- APICallInTest{
+											Test: testTree,
+											GVK:  gvk,
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
 
 		} else if strings.Contains(pkg, "github.com/openshift/client-go") || strings.Contains(pkg, "k8s.io/client-go") {
 			recv, _ := getRecvFromFunc(callee.Func)
 			if recv == nil {
-				klog.Infof("recv for openshift-clientgo is nil")
 				continue
 			}
 
