@@ -3,8 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
+	"go/ast"
 	"go/types"
 	"io/fs"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"path/filepath"
 	"strings"
 	"time"
@@ -29,7 +31,7 @@ func main() {
 	originPath := "/home/pm/dev/origin/" // TODO: Program arg
 
 	pkgs := []string{}
-	filepath.WalkDir(originPath+"test/extended/", func(path string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(originPath+"test/extended/", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			klog.Fatalf("Error when walking origin's dir tree: %v", err)
 		}
@@ -41,8 +43,8 @@ func main() {
 
 	// TESTING
 	pkgs = []string{
-		"/home/pm/dev/origin/test/extended/adminack",
-		// "/home/pm/dev/origin/test/extended/apiserver",
+		// "/home/pm/dev/origin/test/extended/adminack", // OK
+		"/home/pm/dev/origin/test/extended/apiserver",
 		// "/home/pm/dev/origin/test/extended/authentication",
 		// "/home/pm/dev/origin/test/extended/authorization",
 		// "/home/pm/dev/origin/test/extended/authorization/rbac",
@@ -122,7 +124,7 @@ func main() {
 		// "/home/pm/dev/origin/test/extended/util/url",
 	}
 
-	buildReportUsingRTA(originPath, pkgs)
+	_ = buildReportUsingRTA(originPath, pkgs)
 }
 
 type APICallInTest struct {
@@ -200,7 +202,7 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 
 	start = time.Now()
 	// Perform a Rapid Type Analysis (RTA) for given functions. This will build a call graph as well.
-	// This can even lasts about 5 minutes or more (depends on how many packages we want to analyze).
+	// This can even last about 5 minutes or more (depends on how many packages we want to analyze).
 	rtaAnalysis := rta.Analyze(describeFuncsSlice, true)
 	klog.V(2).Infof("rta.Analyze done in %s\n", time.Since(start))
 
@@ -234,7 +236,11 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 		if !found {
 			return fmt.Errorf("couldn't find %s (%s) in rtaAnalysis.CallGraph.Nodes[]", fun.Name(), desc)
 		}
+		if !strings.Contains(desc, "[sig-api-machinery][Feature:ServerSideApply] Server-Side Apply") {
+			continue
+		}
 		klog.V(2).Infof("Inspecting test: %s", desc)
+
 		traverseNodes(rtaAnalysis.CallGraph.Nodes, node, []string{desc}, apiChan, ignoredChan)
 	}
 	klog.V(2).Infof("Traversing tests - done in %s\n", time.Since(start))
@@ -255,6 +261,24 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 	return nil
 }
 
+func lookupASTForGVR(n ast.Node) schema.GroupVersionResource {
+	//var body *ast.BlockStmt
+	//if fDecl, ok := n.(*ast.FuncDecl); ok {
+	//	body = fDecl.Body
+	//} else if fLit, ok := n.(*ast.FuncLit); ok {
+	//	body = fLit.Body
+	//} else {
+	//	panic("unknown Func")
+	//}
+	//_ = body
+
+	ast.Inspect(n, func(node ast.Node) bool {
+
+		return true
+	})
+	return schema.GroupVersionResource{}
+}
+
 func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, parentTestTree []string,
 	apiChan chan<- APICallInTest, ignoreChan chan<- IgnoredCallInTest) {
 
@@ -267,6 +291,10 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 
 		testTree := make([]string, len(parentTestTree))
 		copy(testTree, parentTestTree)
+
+		// TODO: Scan callee's AST for schema.GroupVersionResource{}
+		lookupASTForGVR(callee.Func.Syntax())
+		// TODO: Detect special case of callee being gvr()
 
 		// let's go into Defers only if they're not GinkgoRecover
 		if _, ok := edge.Site.(*ssa.Defer); ok {
@@ -295,10 +323,29 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 				traverseNodes(m, nodeToVisit, testTree, apiChan, ignoreChan)
 			}
 
+		} else if pkg == "k8s.io/apimachinery/pkg/runtime/schema" {
+			stop := 0
+			_ = stop
+
 		} else if strings.Contains(pkg, "k8s.io/client-go/dynamic") {
-			// TODO Handle all cases for unstructured.Unstructured from origin
+			// TODO Handle all cases for unstructured.Unstructured from origin (note: controller-runtime/pkg/client is not used, so maybe only )
 			_, recvName := getRecvFromFunc(callee.Func)
 			klog.Infof("dynamic: recv:%s   func:%s   args:%v", recvName, funcName, argsToStrings(edge.Site.Common().Args))
+
+			// (dynamic.Interface).Resource(GVR) is an entrypoint for using dynamic pkg.
+			// Following patterns were spotted in the origin codebase:
+			// - gvr is created just for Resource() with static data: dynamicClient.Resource(schema.GroupVersionResource{...})
+			// - gvr is obtained from some function. Example: test/extended/apiserver/apply.go:56 (+for loop), test/e2e/upgrade/manifestdelete/manifest-delete.go:169
+			// - gvr is created in "upper" scope (like within a Describe func)
+			// - gvr is created from other struct data: test/e2e/upgrade/manifestdelete/manifest-delete.go:169 +loop
+			// - gvr created at pkg level: test/extended/networking/egressip_helpers.go:108
+			// - gvr is created from runtime data: test/extended/operators/clusteroperators.go:113
+
+			// Challenge: schema.GroupVersionResource{...} is not visible in call graph
+
+			// TODO: Just manually scan all functions for schema.GroupVersionResource{...} or gvr() function.
+			// Later, when reducing data before final report: if the test didn't execute Resource() then mark as potential false positive
+
 			if funcName == "Resource" {
 				// Couldn't find a way to get concrete string args for this call from the call graph itself
 				// and reported recv's name was not matching what is in code
@@ -320,14 +367,19 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 						if len(assignStmt.Rhs) == 1 {
 							if ce, ok := assignStmt.Rhs[0].(*ast.CallExpr); ok {
 								if selExpr, ok := ce.Fun.(*ast.SelectorExpr); ok {
-									if selExpr.Sel.Name == "Resource" && ce.Args[0].(*ast.CompositeLit).Type.(*ast.SelectorExpr).Sel.Name == "GroupVersionResource" {
-										get := func(i int) string {
-											return ce.Args[0].(*ast.CompositeLit).Elts[i].(*ast.KeyValueExpr).Value.(*ast.BasicLit).Value
-										}
-										gvk := fmt.Sprintf("%s/%s.%s", strings.ReplaceAll(get(0), "\"", ""), strings.ReplaceAll(get(2), "\"", ""), strings.ReplaceAll(get(1), "\"", ""))
-										apiChan <- APICallInTest{
-											Test: testTree,
-											GVK:  gvk,
+									if selExpr.Sel.Name == "Resource" {
+										// TODO Resource(gvr-var): Track gvr-var to its declaration
+
+										if ce.Args[0].(*ast.CompositeLit).Type.(*ast.SelectorExpr).Sel.Name == "GroupVersionResource" {
+											// Resource(GroupVersionResource{})
+											get := func(i int) string {
+												return ce.Args[0].(*ast.CompositeLit).Elts[i].(*ast.KeyValueExpr).Value.(*ast.BasicLit).Value
+											}
+											gvk := fmt.Sprintf("%s/%s.%s", strings.ReplaceAll(get(0), "\"", ""), strings.ReplaceAll(get(2), "\"", ""), strings.ReplaceAll(get(1), "\"", ""))
+											apiChan <- APICallInTest{
+												Test: testTree,
+												GVK:  gvk,
+											}
 										}
 									}
 								}
