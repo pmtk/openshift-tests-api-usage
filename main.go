@@ -1,13 +1,13 @@
 package main
 
 import (
-	"flag"
+	"encoding/json"
 	"fmt"
 	"go/types"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/callgraph/rta"
@@ -19,110 +19,48 @@ import (
 	klog "k8s.io/klog/v2"
 )
 
-// TODO: Report as a file
+// TODO: Adjust report to requirements
+// TODO: Handle k8s.io/client-go/dynamic & github.com/openshift/origin/test/extended/util
+
+func checkIfPathExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
+}
 
 func main() {
-	klog.InitFlags(nil)
-	flag.Parse()
 	defer klog.Flush()
 
-	originPath := "/home/pm/dev/origin/" // TODO: Program arg
-
-	pkgs := []string{}
-	filepath.WalkDir(originPath+"test/extended/", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			klog.Fatalf("Error when walking origin's dir tree: %v", err)
-		}
-		if d.IsDir() && !strings.Contains(path, "testdata") {
-			pkgs = append(pkgs, path)
-		}
-		return nil
-	})
-
-	// TESTING
-	pkgs = []string{
-		"/home/pm/dev/origin/test/extended/adminack",
-		// "/home/pm/dev/origin/test/extended/apiserver",
-		// "/home/pm/dev/origin/test/extended/authentication",
-		// "/home/pm/dev/origin/test/extended/authorization",
-		// "/home/pm/dev/origin/test/extended/authorization/rbac",
-		// "/home/pm/dev/origin/test/extended/baremetal",
-		// "/home/pm/dev/origin/test/extended/bootstrap_user",
-		// "/home/pm/dev/origin/test/extended/builds",
-		// "/home/pm/dev/origin/test/extended/ci",
-		// "/home/pm/dev/origin/test/extended/cli",
-		// "/home/pm/dev/origin/test/extended/cluster",
-		// "/home/pm/dev/origin/test/extended/cluster/metrics",
-		// "/home/pm/dev/origin/test/extended/cmd",
-		// "/home/pm/dev/origin/test/extended/controller_manager",
-		// "/home/pm/dev/origin/test/extended/coreos",
-		// "/home/pm/dev/origin/test/extended/crdvalidation",
-		// "/home/pm/dev/origin/test/extended/csrapprover",
-		// "/home/pm/dev/origin/test/extended/deployments",
-		// "/home/pm/dev/origin/test/extended/dns",
-		// "/home/pm/dev/origin/test/extended/dr",
-		// "/home/pm/dev/origin/test/extended/etcd",
-		// "/home/pm/dev/origin/test/extended/etcd/helpers",
-		// "/home/pm/dev/origin/test/extended/idling",
-		// "/home/pm/dev/origin/test/extended/image_ecosystem",
-		// "/home/pm/dev/origin/test/extended/imageapis",
-		// "/home/pm/dev/origin/test/extended/images",
-		// "/home/pm/dev/origin/test/extended/images/trigger",
-		// "/home/pm/dev/origin/test/extended/jobs",
-		// "/home/pm/dev/origin/test/extended/machines",
-		// "/home/pm/dev/origin/test/extended/networking",
-		// "/home/pm/dev/origin/test/extended/oauth",
-		// "/home/pm/dev/origin/test/extended/olm",
-		// "/home/pm/dev/origin/test/extended/operators",
-		// "/home/pm/dev/origin/test/extended/pods",
-		// "/home/pm/dev/origin/test/extended/project",
-		// "/home/pm/dev/origin/test/extended/prometheus",
-		// "/home/pm/dev/origin/test/extended/prometheus/client",
-		// "/home/pm/dev/origin/test/extended/quota",
-		// "/home/pm/dev/origin/test/extended/router",
-		// "/home/pm/dev/origin/test/extended/router/certgen",
-		// "/home/pm/dev/origin/test/extended/router/grpc-interop",
-		// "/home/pm/dev/origin/test/extended/router/h2spec",
-		// "/home/pm/dev/origin/test/extended/router/shard",
-		// "/home/pm/dev/origin/test/extended/scheduling",
-		// "/home/pm/dev/origin/test/extended/scheme",
-		// "/home/pm/dev/origin/test/extended/security",
-		// "/home/pm/dev/origin/test/extended/single_node",
-		// "/home/pm/dev/origin/test/extended/tbr_health",
-		// "/home/pm/dev/origin/test/extended/templates",
-		// "/home/pm/dev/origin/test/extended/templates/openservicebroker",
-		// "/home/pm/dev/origin/test/extended/templates/openservicebroker/api",
-		// "/home/pm/dev/origin/test/extended/templates/openservicebroker/client",
-		// "/home/pm/dev/origin/test/extended/user",
-		// "/home/pm/dev/origin/test/extended/util",
-		// "/home/pm/dev/origin/test/extended/util/alibabacloud",
-		// "/home/pm/dev/origin/test/extended/util/annotate",
-		// "/home/pm/dev/origin/test/extended/util/annotate/generated",
-		// "/home/pm/dev/origin/test/extended/util/azure",
-		// "/home/pm/dev/origin/test/extended/util/baremetal",
-		// "/home/pm/dev/origin/test/extended/util/cluster",
-		// "/home/pm/dev/origin/test/extended/util/db",
-		// "/home/pm/dev/origin/test/extended/util/disruption",
-		// "/home/pm/dev/origin/test/extended/util/disruption/controlplane",
-		// "/home/pm/dev/origin/test/extended/util/disruption/frontends",
-		// "/home/pm/dev/origin/test/extended/util/disruption/imageregistry",
-		// "/home/pm/dev/origin/test/extended/util/ibmcloud",
-		// "/home/pm/dev/origin/test/extended/util/image",
-		// "/home/pm/dev/origin/test/extended/util/imageregistryutil",
-		// "/home/pm/dev/origin/test/extended/util/jenkins",
-		// "/home/pm/dev/origin/test/extended/util/kubevirt",
-		// "/home/pm/dev/origin/test/extended/util/nutanix",
-		// "/home/pm/dev/origin/test/extended/util/oauthserver",
-		// "/home/pm/dev/origin/test/extended/util/oauthserver/tokencmd",
-		// "/home/pm/dev/origin/test/extended/util/openshift",
-		// "/home/pm/dev/origin/test/extended/util/openshift/clusterversionoperator",
-		// "/home/pm/dev/origin/test/extended/util/operator",
-		// "/home/pm/dev/origin/test/extended/util/ovirt",
-		// "/home/pm/dev/origin/test/extended/util/prometheus",
-		// "/home/pm/dev/origin/test/extended/util/url",
+	if len(os.Args) < 2 {
+		klog.Fatalf("Expected path to origin repository as an argument")
+	}
+	originPath := os.Args[1]
+	if exists, err := checkIfPathExists(originPath); !exists {
+		klog.Exitf("Path %s does not exist", originPath)
+	} else if err != nil {
+		klog.Exitf("Error occurred when checking if path %s exists: %v", originPath, err)
 	}
 
-	buildReportUsingRTA(originPath, pkgs)
+	report, err := buildReportUsingRTA(originPath)
+	if err != nil {
+		klog.Fatalf("Failed to build report: %v", err)
+	}
+
+	b, err := json.MarshalIndent(report, "", "   ")
+	if err != nil {
+		klog.Fatalf("Failed to marshal report: %v", err)
+	}
+	klog.Infof("%v", string(b))
+}
+
+type Report struct {
+	TestAPICalls map[string][]string
+	Ignored      []string
 }
 
 type APICallInTest struct {
@@ -138,31 +76,40 @@ type IgnoredCallInTest struct {
 	Args []string
 }
 
-func buildReportUsingRTA(originPath string, pkgs []string) error {
+func buildReportUsingRTA(originPath string) (*Report, error) {
 	cfg := packages.Config{
-		Mode:  packages.LoadAllSyntax,
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
+			packages.NeedImports | packages.NeedTypes | packages.NeedTypesSizes |
+			packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedDeps,
 		Dir:   originPath,
 		Tests: true,
 	}
 
-	klog.V(2).Infof("Pkgs (%v) to scan: %#v", len(pkgs), pkgs)
+	originPkgs := func() []string {
+		res := []string{}
+		_ = filepath.WalkDir(originPath+"/test/extended/", func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				klog.Fatalf("Error when walking origin's dir tree: %v", err)
+			}
+			if d.IsDir() && !strings.Contains(path, "testdata") {
+				res = append(res, path)
+			}
+			return nil
+		})
+		return res
+	}()
+	originPkgs = []string{"/home/pm/dev/origin/test/extended/adminack"}
+	klog.Infof("%d pkgs to scan: %#v", len(originPkgs), originPkgs)
 
-	start := time.Now()
 	// Load packages into a memory with their Abstract Syntax Trees (stored in Syntax member)
-	initial, err := packages.Load(&cfg, pkgs...)
+	initial, err := packages.Load(&cfg, originPkgs...)
 	if err != nil {
-		return fmt.Errorf("packages.Load failed: %w", err)
+		return nil, fmt.Errorf("packages.Load failed: %w", err)
 	}
-	klog.V(2).Infof("packages.Load done in %s\n", time.Since(start))
 
-	start = time.Now()
 	// Build a Single Static Assignment (SSA) form of packages
 	prog, _ := ssautil.AllPackages(initial, ssa.InstantiateGenerics)
-	klog.V(2).Infof("ssautil.AllPackages done in %s\n", time.Since(start))
-
-	start = time.Now()
 	prog.Build()
-	klog.V(2).Infof("prog.Build done in %s\n", time.Since(start))
 
 	// Go through packages from github.com/openshift/origin/test/extended/ and look for init.start block which contains
 	// variables created during init such as `var _ = ginkgo.Describe("DESC", func() {...})`.
@@ -177,15 +124,7 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 				if c, ok := instr.(*ssa.Call); ok {
 					if f, ok := c.Call.Value.(*ssa.Function); ok {
 						if f.Name() == "Describe" {
-							cnst, ok := c.Call.Args[0].(*ssa.Const)
-							if !ok {
-								return fmt.Errorf("expected c.Call.Args[0] to be type *ssa.Const: %#v", c.Call.Args[0])
-							}
-							if cnst.Type().String() != "string" {
-								return fmt.Errorf("expected cnst.Type() to be string: %#v", cnst.Type())
-							}
-							anonFun := c.Call.Args[1].(*ssa.Function)
-							describeFuncs[strings.ReplaceAll(cnst.Value.String(), "\"", "")] = anonFun
+							describeFuncs[strings.ReplaceAll(getStringFromValue(c.Call.Args[0]), "\"", "")] = c.Call.Args[1].(*ssa.Function)
 						}
 					}
 				}
@@ -198,13 +137,12 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 		describeFuncsSlice = append(describeFuncsSlice, fun)
 	}
 
-	start = time.Now()
 	// Perform a Rapid Type Analysis (RTA) for given functions. This will build a call graph as well.
-	// This can even lasts about 5 minutes or more (depends on how many packages we want to analyze).
+	// This can even last about 5 minutes or more (depends on how many packages we want to analyze).
+	klog.Infof("Starting rta.Analyze - it can last several minutes")
 	rtaAnalysis := rta.Analyze(describeFuncsSlice, true)
-	klog.V(2).Infof("rta.Analyze done in %s\n", time.Since(start))
 
-	// Go routine for simple function calls within tests receival instead of returning the results via `return` and merging them in a recursive function.
+	// Go routine receiving results (instead of returning them via return and merging them)
 	apiChan := make(chan APICallInTest)
 	apiCalls := []APICallInTest{}
 	ignoredChan := make(chan IgnoredCallInTest) // Ignored calls are persisted for debugging
@@ -227,32 +165,37 @@ func buildReportUsingRTA(originPath string, pkgs []string) error {
 	}()
 
 	// Go through previously stored list of functions given to ginkgo.Describe and traverse their call graph.
-	klog.V(2).Infof("Traversing %d tests - start\n", len(describeFuncs))
-	start = time.Now()
+	klog.Infof("Traversing %d tests - start", len(describeFuncs))
 	for desc, fun := range describeFuncs {
 		node, found := rtaAnalysis.CallGraph.Nodes[fun]
 		if !found {
-			return fmt.Errorf("couldn't find %s (%s) in rtaAnalysis.CallGraph.Nodes[]", fun.Name(), desc)
+			return nil, fmt.Errorf("couldn't find %s (%s) in rtaAnalysis.CallGraph.Nodes[]", fun.Name(), desc)
 		}
-		klog.V(2).Infof("Inspecting test: %s", desc)
+		klog.Infof("Inspecting test: %s", desc)
 		traverseNodes(rtaAnalysis.CallGraph.Nodes, node, []string{desc}, apiChan, ignoredChan)
 	}
-	klog.V(2).Infof("Traversing tests - done in %s\n", time.Since(start))
 	close(apiChan)
 	close(ignoredChan)
 
-	// Just some testing purposes print out
-	for _, c := range apiCalls {
-		fmt.Printf("API: %s -> %s\n", strings.Join(c.Test, " "), c.GVK)
-	}
-
-	fmt.Printf("\n\n\n")
-
-	for _, c := range ignoredCalls {
-		fmt.Printf("IGNORED: (%s.%s).%s()\n", c.Pkg, c.Recv, c.Func)
-	}
-
-	return nil
+	return &Report{
+		TestAPICalls: func(acits []APICallInTest) map[string][]string {
+			m := make(map[string]sets.String)
+			for _, acit := range acits {
+				testName := strings.Join(acit.Test, " ")
+				if _, found := m[testName]; found {
+					m[testName] = m[testName].Insert(acit.GVK)
+				} else {
+					m[testName] = sets.NewString(acit.GVK)
+				}
+			}
+			res := make(map[string][]string)
+			for k, v := range m {
+				res[k] = v.List()
+			}
+			return res
+		}(apiCalls),
+		Ignored: uniqueStringSlice(mapIgnores(ignoredCalls)),
+	}, nil
 }
 
 func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, parentTestTree []string,
@@ -295,13 +238,9 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 				traverseNodes(m, nodeToVisit, testTree, apiChan, ignoreChan)
 			}
 
-		} else if strings.Contains(pkg, "k8s.io/client-go/dynamic") {
-			// TODO Handle untyped clients like: k8s.io/client-go/dynamic.Create("context.Background()", "new k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.Unstructured (complit)", "*t27", "nil:[]string")
-
-		} else if strings.Contains(pkg, "github.com/openshift/client-go") || strings.Contains(pkg, "k8s.io/client-go") {
+		} else if (strings.Contains(pkg, "github.com/openshift/client-go") || strings.Contains(pkg, "k8s.io/client-go")) && !strings.Contains(pkg, "k8s.io/client-go/dynamic") {
 			recv, _ := getRecvFromFunc(callee.Func)
 			if recv == nil {
-				klog.Infof("recv for openshift-clientgo is nil")
 				continue
 			}
 
@@ -317,19 +256,6 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 					}
 				}
 			}
-
-		} else if pkg == "github.com/openshift/origin/test/extended/util" {
-			// *CLI[.AsAdmin()].Run().Args().Output()
-			// *CLI[.AsAdmin()].Run().Args().Execute()
-			// *CLI[.AsAdmin()].Run().Args().Background()
-			// other util helper functions - go in
-
-			// [Admin]KubeClient(), UserConfig(), AdminConfig() - ignore and just check following func calls
-			recv, recvName := getRecvFromFunc(callee.Func)
-			stop := 0
-			_ = stop
-			_ = recv
-			_ = recvName
 
 		} else if strings.Contains(pkg, "k8s.io/kubernetes/test/e2e") || strings.Contains(pkg, "github.com/openshift/origin/test/") {
 			// go into the helper functions but avoid recursion
@@ -500,4 +426,17 @@ func getRecvFromFunc(f *ssa.Function) (*types.Named, string) {
 	} else {
 		panic("investigate arg0type type")
 	}
+}
+
+func uniqueStringSlice(s []string) []string {
+	set := sets.NewString(s...)
+	return set.List()
+}
+
+func mapIgnores(ignores []IgnoredCallInTest) []string {
+	res := make([]string, 0, len(ignores))
+	for _, ign := range ignores {
+		res = append(res, fmt.Sprintf("(%s.%s).%s()", ign.Pkg, ign.Recv, ign.Func))
+	}
+	return res
 }
