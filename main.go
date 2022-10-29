@@ -8,10 +8,12 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
+	"go/ast"
+	"go/token"
 	"go/types"
+	"golang.org/x/tools/go/ast/astutil"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -29,7 +31,6 @@ import (
 	klog "k8s.io/klog/v2"
 )
 
-// TODO: Adjust report to requirements
 // TODO: Handle k8s.io/client-go/dynamic & github.com/openshift/origin/test/extended/util
 // TODO: Confirm correctness of the report
 
@@ -55,51 +56,33 @@ func main() {
 		rx = regexp.MustCompile(*testdirRegexp)
 	}
 
-	report, err := buildReportUsingRTA(*originPathArg, rx)
+	pkgs, err := getPackages(*originPathArg, rx)
 	if err != nil {
+		klog.Fatalf("Failed to build SSA.Program: %v", err)
+	}
+
+	// Build a Single Static Assignment (SSA) form of packages
+	klog.Infof("Building Single Static Assignment (SSA) forms")
+	prog, _ := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics|ssa.GlobalDebug)
+	prog.Build()
+
+	if err := analyzeProgramUsingRTA(prog, pkgs); err != nil {
 		klog.Fatalf("Failed to build report: %v", err)
 	}
-
-	b, err := json.MarshalIndent(report, "", "   ")
-	if err != nil {
-		klog.Fatalf("Failed to marshal report: %v", err)
-	}
-	klog.Infof("Report: %v", string(b))
 }
 
-// Report is final result of the program. It's subject to changes to align with requirements coming from integration with origin repository.
-type Report struct {
-	TestAPICalls map[string][]string
-	Ignored      []string
-}
-
-// APICallInTest represents a single call to the API (described as Group-Version-Kind) within some test tree.
-type APICallInTest struct {
-	Test []string // [Describe-Description, [Describe/Context-Description...], It-Description]
-	GVK  string
-}
-
-// IgnoredCallInTest is a record of function call that was not considered an API call but was still persisted for debug purposes.
-type IgnoredCallInTest struct {
-	Test []string
-	Pkg  string
-	Recv string
-	Func string
-	Args []string
-}
-
-func buildReportUsingRTA(originPath string, rx *regexp.Regexp) (*Report, error) {
-	cfg := packages.Config{
+func getPackages(path string, rx *regexp.Regexp) ([]*packages.Package, error) {
+	astCfg := packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 			packages.NeedImports | packages.NeedTypes | packages.NeedTypesSizes |
 			packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedDeps,
-		Dir:   originPath,
+		Dir:   path,
 		Tests: true,
 	}
 
 	originPkgs := func() []string {
 		res := []string{}
-		_ = filepath.WalkDir(originPath+"/test/extended/", func(path string, d fs.DirEntry, err error) error {
+		_ = filepath.WalkDir(path+"/test/extended/", func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				klog.Fatalf("Error when walking origin's dir tree: %v", err)
 			}
@@ -116,132 +99,135 @@ func buildReportUsingRTA(originPath string, rx *regexp.Regexp) (*Report, error) 
 
 	// Load packages into a memory with their Abstract Syntax Trees (stored in Syntax member)
 	klog.Infof("Building Abstract Syntax Trees")
-	initial, err := packages.Load(&cfg, originPkgs...)
+	ppkgs, err := packages.Load(&astCfg, originPkgs...)
 	if err != nil {
 		return nil, fmt.Errorf("packages.Load failed: %w", err)
 	}
+	return ppkgs, nil
+}
 
-	// Build a Single Static Assignment (SSA) form of packages
-	klog.Infof("Building Single Static Assignment forms")
-	prog, _ := ssautil.AllPackages(initial, ssa.InstantiateGenerics)
-	prog.Build()
+// getGinkgoNodes traverses anonymous functions of given ssa.Function.
+// It expects to get a function called 'init' (the one that bootstraps package and contains anonymous functions used in
+// Ginkgo functions such as Describe, Context, and It.)
+func getGinkgoNodes(af *ssa.Function, fset *token.FileSet, p *packages.Package, out map[token.Position]*ssa.Function) {
+	for _, af2 := range af.AnonFuncs {
+		getGinkgoNodes(af2, fset, p, out)
+	}
 
+	pos := fset.Position(af.Pos())
+	idx := getIndex(p.GoFiles, func(s string) bool { return s == pos.Filename })
+	if idx == -1 {
+		return
+	}
+
+	path, _ := astutil.PathEnclosingInterval(p.Syntax[idx], af.Pos(), af.Pos())
+	// Because af.Pos() points at the anonymous function following path is expected: *ast.FuncType, *ast.FuncLit, *ast.CallExpr, ...
+	// That 3rd item is ginkgo.{Describe,Context,It}()
+	node := path[2]
+	callExpr, ok := node.(*ast.CallExpr)
+	if !ok {
+		return
+	}
+	fun, ok := callExpr.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return
+	}
+	switch fun.Sel.Name {
+	case "Describe", "Context", "It":
+		out[pos] = af
+	}
+}
+
+func analyzeProgramUsingRTA(prog *ssa.Program, pkgs []*packages.Package) error {
 	// Go through packages from github.com/openshift/origin/test/extended/ and look for init.start block which contains
 	// variables created during init such as `var _ = ginkgo.Describe("DESC", func() {...})`.
 	// Store their description and pointer to the `func() {...}`.
-	describeFuncs := map[string]*ssa.Function{}
+
+	ginkgoNodes := map[token.Position]*ssa.Function{}
 	for _, pkg := range prog.AllPackages() {
 		if pkg != nil && strings.Contains(pkg.Pkg.Path(), "github.com/openshift/origin/test/extended/") {
-			init := pkg.Members["init"].(*ssa.Function)
-			initStart := init.Blocks[1] // "init.start"
 
-			for _, instr := range initStart.Instrs {
-				if c, ok := instr.(*ssa.Call); ok {
-					if f, ok := c.Call.Value.(*ssa.Function); ok {
-						if f.Name() == "Describe" {
-							describeFuncs[strings.ReplaceAll(getStringFromValue(c.Call.Args[0]), "\"", "")] = c.Call.Args[1].(*ssa.Function)
-						}
-					}
-				}
+			// ssa.Program contains more pkgs than we care about
+			// intersect with AST []*packages.Package so only packages requested by -filter are handled
+			ppkgs := filter(pkgs, func(p *packages.Package) bool {
+				return pkg.Pkg.Path() == p.ID
+			})
+			if len(ppkgs) == 0 {
+				continue
 			}
+			init := pkg.Members["init"].(*ssa.Function)
+			getGinkgoNodes(init, prog.Fset, ppkgs[0], ginkgoNodes)
 		}
 	}
-
-	describeFuncsSlice := make([]*ssa.Function, 0, len(describeFuncs))
-	for _, fun := range describeFuncs {
-		describeFuncsSlice = append(describeFuncsSlice, fun)
-	}
-	klog.Infof("Found %d top level ginkgo Describes to be traversed. Note: It might not align with list of packages to scan.", len(describeFuncsSlice))
 
 	// Perform a Rapid Type Analysis (RTA) for given functions. This will build a call graph as well.
 	// This can even last about 5 minutes or more (depends on how many packages we want to analyze).
 	klog.Infof("Building call graphs using Rapid Type Analysis (RTA) - it can take several minutes")
-	rtaAnalysis := rta.Analyze(describeFuncsSlice, true)
+	rtaAnalysis := rta.Analyze(getValues(ginkgoNodes), true)
 
-	// Go routine receiving results (instead of returning them via return and merging them)
-	apiChan := make(chan APICallInTest)
-	apiCalls := []APICallInTest{}
-	ignoredChan := make(chan IgnoredCallInTest) // Ignored calls are persisted for debugging
-	ignoredCalls := sets.String{}
-	go func() {
-		for {
-			select {
-			case c, ok := <-apiChan:
-				if !ok {
-					return
-				}
-				apiCalls = append(apiCalls, c)
-			case c, ok := <-ignoredChan:
-				if !ok {
-					return
-				}
-				// Simple string set for ignored otherwise we'd use a lot of memory just for these
-				ignoredCalls.Insert(fmt.Sprintf("(%s.%s).%s()", c.Pkg, c.Recv, c.Func))
-			}
-		}
-	}()
+	w := New(prog.Fset, rtaAnalysis.CallGraph.Nodes)
 
 	wg := &sync.WaitGroup{}
-	// Go through previously stored list of functions given to ginkgo.Describe and traverse their call graph.
-	klog.Infof("Traversing %d tests - start", len(describeFuncs))
-	for desc, fun := range describeFuncs {
-		node, found := rtaAnalysis.CallGraph.Nodes[fun]
+	for position, fun := range ginkgoNodes {
+		position := position
+		node, found := w.FuncToNode[fun]
 		if !found {
-			return nil, fmt.Errorf("couldn't find %s (%s) in rtaAnalysis.CallGraph.Nodes[]", fun.Name(), desc)
+			return fmt.Errorf("couldn't find %s (%s) in rtaAnalysis.CallGraph.Nodes[]", fun.Name(), position)
 		}
 		wg.Add(1)
-		go func(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, desc string,
-			apiChan chan<- APICallInTest, ignoreChan chan<- IgnoredCallInTest) {
-			klog.Infof("Inspecting '%s'", desc)
-			res := traverseNodes(m, node, []string{desc}, apiChan, ignoreChan, 1)
-			klog.Infof("Done inspecting '%s'. Potential call loop detected (quick unwind): %v", desc, !res)
+		go func(node *callgraph.Node, pos token.Position) {
+			klog.Infof("Inspecting '%s'", position)
+			w.traverseNodes(node, pos, 1)
 			wg.Done()
-		}(rtaAnalysis.CallGraph.Nodes, node, desc, apiChan, ignoredChan)
+		}(node, position)
 	}
 	wg.Wait()
-	close(apiChan)
-	close(ignoredChan)
 
-	return &Report{
-		TestAPICalls: func(acits []APICallInTest) map[string][]string {
-			m := make(map[string]sets.String)
-			for _, acit := range acits {
-				testName := strings.Join(acit.Test, " ")
-				if _, found := m[testName]; found {
-					m[testName] = m[testName].Insert(acit.GVK)
-				} else {
-					m[testName] = sets.NewString(acit.GVK)
-				}
-			}
-			res := make(map[string][]string)
-			for k, v := range m {
-				res[k] = v.List()
-			}
-			return res
-		}(apiCalls),
-		Ignored: ignoredCalls.List(),
-	}, nil
+	klog.Infof("%+v\n", w.GetReport())
+
+	return nil
 }
 
-var potentialCallLoop = sync.Map{}
+func New(fset *token.FileSet, funcToNode map[*ssa.Function]*callgraph.Node) *worker {
+	return &worker{
+		Fset:       fset,
+		FuncToNode: funcToNode,
+		r:          make(map[string]struct{}),
+	}
+}
+
+type worker struct {
+	Fset       *token.FileSet
+	FuncToNode map[*ssa.Function]*callgraph.Node
+
+	m sync.Mutex
+	r map[string]struct{}
+}
+
+func (w *worker) Report(s string) {
+	w.m.Lock()
+	defer w.m.Unlock()
+	w.r[s] = struct{}{}
+}
+
+func (w *worker) GetReport() []string {
+	res := []string{}
+	for k := range w.r {
+		res = append(res, k)
+	}
+	return res
+}
 
 // traverseNodes visits callee's executed by given node.Caller in depth first manner.
 // Callees are inspected in terms of pkg and function name to determine if they're an API call.
 // Each ginkgo node (e.g. Describe, Context, It) appends a new string to parentTestTree.
 // If a function call is considered final (API or ignored), it's reported via either apiChan or ignoreChan.
-// Return value means if traversal should proceed. Currently primary case when traversal should stop is
-// traversing gets too deep - that might mean a infinite call loop was detected.
-func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, parentTestTree []string,
-	apiChan chan<- APICallInTest, ignoreChan chan<- IgnoredCallInTest, depth int) bool {
+func (w *worker) traverseNodes(node *callgraph.Node, pos token.Position, depth int) {
 	// In some tests there appears to be a call loop going through couple of the same tests over and over.
 	// Following block is just reports them.
 	// TODO: Investigate and figure out how to break that loop
 	if depth > 50 {
-		if _, found := potentialCallLoop.Load(parentTestTree[0]); !found {
-			potentialCallLoop.Store(parentTestTree[0], true)
-			klog.Infof("Potential infinite call loop detected: '%s'\n", parentTestTree[0])
-		}
-		return false
+		return
 	}
 
 	// Node represents specific function within a call graph
@@ -251,15 +237,11 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 		funcName := callee.Func.Name()
 		pkg := getCalleesPkgPath(callee)
 
-		testTree := make([]string, len(parentTestTree))
-		copy(testTree, parentTestTree)
-
 		// Let's go into Defers only if they're not GinkgoRecover
 		if _, ok := edge.Site.(*ssa.Defer); ok {
 			if funcName != "GinkgoRecover" {
-				if !traverseNodes(m, edge.Callee, testTree, apiChan, ignoreChan, depth+1) {
-					return false
-				}
+				w.traverseNodes(edge.Callee, pos, depth+1)
+				return
 			}
 			continue
 		}
@@ -273,34 +255,20 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 				args := edge.Site.Value().Call.Args
 
 				f := getFuncFromValue(args[1])
-				nodeToVisit, found := m[f]
+				nodeToVisit, found := w.FuncToNode[f]
 				if !found {
 					panic(fmt.Sprintf("f3(%v) not found in m", f.Name()))
 				}
-
-				ginkgoDesc := getStringFromValue(args[0])
-				testTree = append(testTree, strings.ReplaceAll(ginkgoDesc, "\"", ""))
-				if !traverseNodes(m, nodeToVisit, testTree, apiChan, ignoreChan, depth+1) {
-					return false
-				}
+				w.traverseNodes(nodeToVisit, w.Fset.Position(nodeToVisit.Func.Pos()), depth+1)
 			}
 
-		} else if (strings.Contains(pkg, "github.com/openshift/client-go") || strings.Contains(pkg, "k8s.io/client-go")) &&
-			!strings.Contains(pkg, "k8s.io/client-go/dynamic") {
+		} else if strings.Contains(pkg, "github.com/openshift/client-go") {
 			recv, _ := getRecvFromFunc(callee.Func)
-			if recv == nil {
-				continue
-			}
-
-			if checkIfClientGoInterface(recv) {
+			if recv != nil && checkIfClientGoInterface(recv) {
 				for i := 0; i < recv.NumMethods(); i++ {
 					if recv.Method(i).Name() == "Get" {
 						obj := recv.Method(i).Type().(*types.Signature).Results().At(0).Type().(*types.Pointer).Elem().(*types.Named).Obj()
-						gvk := fmt.Sprintf("%s.%s", obj.Pkg().Path(), obj.Name())
-						apiChan <- APICallInTest{
-							Test: testTree,
-							GVK:  gvk,
-						}
+						w.Report(fmt.Sprintf("%v: %v.openshift.io\n", pos, strings.Split(obj.Pkg().Path(), "/")[3]))
 					}
 				}
 			}
@@ -308,27 +276,10 @@ func traverseNodes(m map[*ssa.Function]*callgraph.Node, node *callgraph.Node, pa
 		} else if strings.Contains(pkg, "k8s.io/kubernetes/test/e2e") || strings.Contains(pkg, "github.com/openshift/origin/test/") {
 			// Go into the helper functions but avoid recursion
 			if edge.Callee != edge.Caller {
-				if !traverseNodes(m, callee, testTree, apiChan, ignoreChan, depth+1) {
-					return false
-				}
-			}
-
-		} else if !strings.Contains(pkg, "gomega") && !strings.Contains(pkg, "ginkgo") && !strings.Contains(pkg, "golang.org") {
-			if _, found := standardPackages[pkg]; !found {
-				// Store ignored calls for debug purposes
-				_, recvName := getRecvFromFunc(callee.Func)
-				ignoreChan <- IgnoredCallInTest{
-					Test: testTree,
-					Pkg:  pkg,
-					Recv: recvName,
-					Func: funcName,
-					Args: argsToStrings(edge.Site.Common().Args),
-				}
+				w.traverseNodes(callee, pos, depth+1)
 			}
 		}
 	}
-
-	return true
 }
 
 // standardPackages is a naive list of Go's standard packages from which function calls
@@ -346,15 +297,6 @@ var standardPackages = func() map[string]struct{} {
 
 	return result
 }()
-
-// argsToStrings transforms []ssa.Value
-func argsToStrings(args []ssa.Value) []string {
-	as := []string{}
-	for _, arg := range args {
-		as = append(as, arg.String())
-	}
-	return as
-}
 
 func getCalleesPkgPath(callee *callgraph.Node) string {
 	if callee.Func.Pkg != nil {
@@ -418,35 +360,6 @@ func getFuncFromValue(v ssa.Value) *ssa.Function {
 
 	klog.Fatalf("getFuncFromValue: v's type is unexpected: %T", v)
 	return nil
-}
-
-// getStringFromValue converts ssa.Value to string, panics if fails
-// It expects to receive an arg0 of ginkgo's Describe/Context/It
-func getStringFromValue(v ssa.Value) string {
-	switch v := v.(type) {
-	case *ssa.Const:
-		// Describe(STRING, ...)
-		return v.Value.ExactString()
-
-	case *ssa.Call:
-		if v.Call.Value.Name() == "Sprintf" {
-			if c, ok := v.Call.Args[0].(*ssa.Const); ok {
-				// Describe(fmt.Sprintf(STRING, ...), ...)
-				return c.Value.String()
-			} else if bo, ok := v.Call.Args[0].(*ssa.BinOp); ok {
-				return bo.String()
-			}
-		} else {
-			klog.Fatalf("getStringFromValue: unexpected call: %s", v.Call.Value.Name())
-		}
-
-	case *ssa.BinOp:
-		// It("test/cmd/"+currFilename, ...)
-		// TODO: Better string
-		return v.String()
-	}
-
-	panic(fmt.Sprintf("getStringFromValue: v's type in unexpected: %T", v))
 }
 
 var expectedMethods = []string{
