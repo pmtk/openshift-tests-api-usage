@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"go/token"
+	"go/types"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -139,6 +141,28 @@ func getPkgs(astPkgs []*packages.Package, ssaPkgs []*ssa.Package, prog *ssa.Prog
 }
 
 func workOnPkg(pkg Package) {
+	for _, member := range pkg.SSA.Members {
+		if member.Token() != token.VAR || member.Object() == nil {
+			continue
+		}
+
+		// TODO: Get actual `group` value
+		switch obj := member.Object().Type().(type) {
+		case *types.Named:
+			_ = isGVR_Named(obj)
+			println("detected var GVR")
+		case *types.Slice:
+			isGVR := isGVR_Type(obj.Elem())
+			_ = isGVR
+			fmt.Printf("detected []GVR\n")
+		case *types.Map:
+			isKeyGVR := isGVR_Type(obj.Key())
+			isElemGVR := isGVR_Type(obj.Elem())
+			fmt.Printf("detected gvr map key:%v val:%v\n", isKeyGVR, isElemGVR)
+		default:
+			panic(nil)
+		}
+	}
 
 	// detect creation of GVR by:
 	// - GroupVersionResource{ }
@@ -150,6 +174,20 @@ func workOnPkg(pkg Package) {
 	// 3 scan Describe's anon-func in context of 1
 	// 4 func scan line/instr by line/instr
 	// 5 descend into functions with context build in 4
+}
+
+func isGVR_Type(t types.Type) bool {
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+	return isGVR_Named(named)
+}
+
+func isGVR_Named(n *types.Named) bool {
+	typeName := n.Obj()
+	return typeName.Id() == "GroupVersionResource" &&
+		typeName.Pkg().Path() == "k8s.io/apimachinery/pkg/runtime/schema"
 }
 
 func findGinkgoDescribes() {

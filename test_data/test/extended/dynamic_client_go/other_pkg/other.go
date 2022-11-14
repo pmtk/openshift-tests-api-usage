@@ -6,13 +6,13 @@ import "k8s.io/apimachinery/pkg/runtime/schema"
 
 func GetMapGVRKey() map[schema.GroupVersionResource]bool {
 	return map[schema.GroupVersionResource]bool{
-		schema.GroupVersionResource{Group: "authorization.openshift.io", Version: "v1", Resource: "roles"}: true,
+		schema.GroupVersionResource{Group: "f832.openshift.io", Version: "v1", Resource: "testdata"}: true,
 	}
 }
 
 func GetMapGVRKeyFromFunc() map[schema.GroupVersionResource]bool {
 	return map[schema.GroupVersionResource]bool{
-		GVR("authorization.openshift.io", "v1", "roles"): true,
+		GVR("a6d1.openshift.io", "v1", "testdata"): true,
 	}
 }
 func GVR(g, v, r string) schema.GroupVersionResource {
