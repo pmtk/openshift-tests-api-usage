@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
-	"go/token"
+	"go/ast"
 	"go/types"
 	"io/fs"
 	"os"
@@ -141,47 +141,72 @@ func getPkgs(astPkgs []*packages.Package, ssaPkgs []*ssa.Package, prog *ssa.Prog
 }
 
 func workOnPkg(pkg Package) {
-	for _, member := range pkg.SSA.Members {
-		if member.Token() != token.VAR || member.Object() == nil {
-			continue
-		}
-
-		// TODO: Get actual `group` value
-		switch obj := member.Object().Type().(type) {
-		case *types.Named:
-			_ = isGVR_Named(obj)
-			println("detected var GVR")
-		case *types.Slice:
-			isGVR := isGVR_Type(obj.Elem())
-			_ = isGVR
-			fmt.Printf("detected []GVR\n")
-		case *types.Map:
-			isKeyGVR := isGVR_Type(obj.Key())
-			isElemGVR := isGVR_Type(obj.Elem())
-			fmt.Printf("detected gvr map key:%v val:%v\n", isKeyGVR, isElemGVR)
-		default:
-			panic(nil)
-		}
-	}
-
-	// detect creation of GVR by:
-	// - GroupVersionResource{ }
-	// - gvr() helper func like in test/extended/etcd/etcd_storage_path.go
-
 	// to do:
 	// 1 scan pkg ast/ssa (decide) for all variables of type GroupVersionResource
 	// 2 find all var _ = g.Describe
 	// 3 scan Describe's anon-func in context of 1
 	// 4 func scan line/instr by line/instr
 	// 5 descend into functions with context build in 4
+
+	initFunc := pkg.SSA.Func("init")
+	for _, instr := range initFunc.Blocks[1].Instrs { // init.start
+		group := ""
+
+		// get group const str used in creation using struct initializer (GroupVersionResource{...})
+		if store, ok := instr.(*ssa.Store); ok {
+			if fieldAddr, ok := store.Addr.(*ssa.FieldAddr); ok && isGVR_Type(fieldAddr.X.Type()) {
+				if c, ok := store.Val.(*ssa.Const); ok {
+					if strings.Contains(c.Value.ExactString(), ".openshift.io") {
+						group = strings.ReplaceAll(c.Value.ExactString(), "\"", "")
+					}
+				}
+			}
+		}
+
+		funcReturnsGVR := func(f *ssa.Function) bool {
+			funcDecl, ok := f.Syntax().(*ast.FuncDecl)
+			if !ok {
+				return false
+			}
+			// For now assuming it's just a simple helper like in etcd tests
+			if len(funcDecl.Type.Results.List) != 1 {
+				return false
+			}
+			se, ok := funcDecl.Type.Results.List[0].Type.(*ast.SelectorExpr)
+			if !ok {
+				return false
+			}
+			return se.Sel.Name == "GroupVersionResource"
+		}
+
+		if call, ok := instr.(*ssa.Call); ok {
+			f, ok := call.Call.Value.(*ssa.Function)
+			if !ok || !funcReturnsGVR(f) {
+				continue
+			}
+			for _, arg := range call.Call.Args {
+				if c, ok := arg.(*ssa.Const); ok && strings.Contains(c.Value.ExactString(), ".openshift.io") {
+					group = strings.ReplaceAll(c.Value.ExactString(), "\"", "")
+					break
+				}
+			}
+		}
+
+		if group != "" {
+			println(group)
+		}
+	}
 }
 
 func isGVR_Type(t types.Type) bool {
-	named, ok := t.(*types.Named)
-	if !ok {
-		return false
+	switch t := t.(type) {
+	case *types.Named:
+		return isGVR_Named(t)
+	case *types.Pointer:
+		return isGVR_Type(t.Elem())
 	}
-	return isGVR_Named(named)
+
+	return false
 }
 
 func isGVR_Named(n *types.Named) bool {
@@ -189,6 +214,10 @@ func isGVR_Named(n *types.Named) bool {
 	return typeName.Id() == "GroupVersionResource" &&
 		typeName.Pkg().Path() == "k8s.io/apimachinery/pkg/runtime/schema"
 }
+
+//func isGVR_Pointer(p *types.Pointer) bool {
+//	return p.Underlying()
+//}
 
 func findGinkgoDescribes() {
 
