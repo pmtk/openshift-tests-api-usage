@@ -3,8 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"go/ast"
-	"go/types"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -12,9 +10,6 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/packages"
-	"golang.org/x/tools/go/ssa"
-	"golang.org/x/tools/go/ssa/ssautil"
-
 	"k8s.io/klog/v2"
 )
 
@@ -49,10 +44,11 @@ func main() {
 			}
 		}
 	}
-	prog, ssaPkgs := getSSA(astPkgs)
-	pkgs := getPkgs(astPkgs, ssaPkgs, prog)
-	for _, pkg := range pkgs {
-		workOnPkg(pkg)
+
+	for _, astPkg := range astPkgs {
+		if len(astPkg.Errors) == 0 {
+			workOnAstPkg(astPkg)
+		}
 	}
 }
 
@@ -92,137 +88,11 @@ func getASTpackages(originPath string, pkgs []string) ([]*packages.Package, erro
 			packages.NeedImports | packages.NeedTypes | packages.NeedTypesSizes |
 			packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedDeps,
 		Dir: originPath,
+		//BuildFlags: []string{"-N", "-l"},
 	}
 	ppkgs, err := packages.Load(&astCfg, pkgs...)
 	if err != nil {
 		return nil, fmt.Errorf("packages.Load failed: %w", err)
 	}
 	return ppkgs, nil
-}
-
-func getSSA(pkgs []*packages.Package) (*ssa.Program, []*ssa.Package) {
-	prog, ssapkgs := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics|ssa.GlobalDebug)
-	prog.Build()
-	return prog, ssapkgs
-}
-
-type Package struct {
-	AST  *packages.Package
-	SSA  *ssa.Package
-	Prog *ssa.Program
-}
-
-func getPkgs(astPkgs []*packages.Package, ssaPkgs []*ssa.Package, prog *ssa.Program) []Package {
-	pkgs := []Package{}
-	for _, ssapkg := range ssaPkgs {
-		if ssapkg == nil {
-			continue
-		}
-		foundASTPkgs := filter(astPkgs, func(p *packages.Package) bool {
-			if p == nil {
-				return false
-			}
-			return ssapkg.Pkg.Path() == p.ID
-		})
-		if len(foundASTPkgs) == 0 {
-			continue
-		}
-		if len(foundASTPkgs) > 1 {
-			panic("len(foundASTPkgs) > 1")
-		}
-		astPkg := foundASTPkgs[0]
-		pkgs = append(pkgs, Package{
-			AST:  astPkg,
-			SSA:  ssapkg,
-			Prog: prog,
-		})
-	}
-	return pkgs
-}
-
-func workOnPkg(pkg Package) {
-	// to do:
-	// 1 scan pkg ast/ssa (decide) for all variables of type GroupVersionResource
-	// 2 find all var _ = g.Describe
-	// 3 scan Describe's anon-func in context of 1
-	// 4 func scan line/instr by line/instr
-	// 5 descend into functions with context build in 4
-
-	initFunc := pkg.SSA.Func("init")
-	for _, instr := range initFunc.Blocks[1].Instrs { // init.start
-		group := ""
-
-		// get group const str used in creation using struct initializer (GroupVersionResource{...})
-		if store, ok := instr.(*ssa.Store); ok {
-			if fieldAddr, ok := store.Addr.(*ssa.FieldAddr); ok && isGVR_Type(fieldAddr.X.Type()) {
-				if c, ok := store.Val.(*ssa.Const); ok {
-					if strings.Contains(c.Value.ExactString(), ".openshift.io") {
-						group = strings.ReplaceAll(c.Value.ExactString(), "\"", "")
-					}
-				}
-			}
-		}
-
-		funcReturnsGVR := func(f *ssa.Function) bool {
-			funcDecl, ok := f.Syntax().(*ast.FuncDecl)
-			if !ok {
-				return false
-			}
-			// For now assuming it's just a simple helper like in etcd tests
-			if len(funcDecl.Type.Results.List) != 1 {
-				return false
-			}
-			se, ok := funcDecl.Type.Results.List[0].Type.(*ast.SelectorExpr)
-			if !ok {
-				return false
-			}
-			return se.Sel.Name == "GroupVersionResource"
-		}
-
-		if call, ok := instr.(*ssa.Call); ok {
-			f, ok := call.Call.Value.(*ssa.Function)
-			if !ok || !funcReturnsGVR(f) {
-				continue
-			}
-			for _, arg := range call.Call.Args {
-				if c, ok := arg.(*ssa.Const); ok && strings.Contains(c.Value.ExactString(), ".openshift.io") {
-					group = strings.ReplaceAll(c.Value.ExactString(), "\"", "")
-					break
-				}
-			}
-		}
-
-		if group != "" {
-			println(group)
-		}
-	}
-}
-
-func isGVR_Type(t types.Type) bool {
-	switch t := t.(type) {
-	case *types.Named:
-		return isGVR_Named(t)
-	case *types.Pointer:
-		return isGVR_Type(t.Elem())
-	}
-
-	return false
-}
-
-func isGVR_Named(n *types.Named) bool {
-	typeName := n.Obj()
-	return typeName.Id() == "GroupVersionResource" &&
-		typeName.Pkg().Path() == "k8s.io/apimachinery/pkg/runtime/schema"
-}
-
-//func isGVR_Pointer(p *types.Pointer) bool {
-//	return p.Underlying()
-//}
-
-func findGinkgoDescribes() {
-
-}
-
-func getPackageVars() {
-
 }

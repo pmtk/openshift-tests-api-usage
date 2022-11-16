@@ -10,32 +10,55 @@ import (
 	"k8s.io/client-go/dynamic"
 )
 
-var _ = g.Describe("gvr as a map key created via func from another pkg", func() {
-	gvrs := other_pkg.GetMapGVRKeyFromFunc()
-	g.It("L2 [apigroup:a6d1.openshift.io]", func() {
-		dynamicClient := dynamic.NewForConfigOrDie(nil)
-		for gvr, _ := range gvrs {
-			_ = dynamicClient.Resource(gvr)
-		}
+var _ = g.Describe("dynamic client is created inline, GVR is literate", func() {
+	g.It("L2 [apigroup:23d0.openshift.io]", func() {
+		res := dynamic.NewForConfigOrDie(nil).Resource(schema.GroupVersionResource{Group: "23d0.openshift.io", Version: "v1", Resource: "testdata"})
+		res.Get(context.TODO(), "test-123", metav1.GetOptions{})
 	})
 })
 
-var _ = g.Describe("gvr as a map key from another pkg", func() {
-	gvrs := other_pkg.GetMapGVRKey()
-	g.It("L2 [apigroup:f832.openshift.io]", func() {
-		dynamicClient := dynamic.NewForConfigOrDie(nil)
-		for gvr, _ := range gvrs {
-			_ = dynamicClient.Resource(gvr)
-		}
+var _ = g.Describe("dynamic client is created inline, GVR is literate but using variables", func() {
+	gr := "213j.openshift.io"
+	v := "v1"
+	r := "testdata"
+	g.It("L2 [apigroup:213j.openshift.io]", func() {
+		res := dynamic.NewForConfigOrDie(nil).Resource(schema.GroupVersionResource{Group: gr, Version: v, Resource: r})
+		res.Get(context.TODO(), "test-123", metav1.GetOptions{})
 	})
 })
 
-var _ = g.Describe("dynamic client is created at Describe level [apigroup:3e90.openshift.io]", func() {
-	gvr := schema.GroupVersionResource{Group: "3e90.openshift.io", Version: "v1", Resource: "testdata"}
-	dynamicClient := dynamic.NewForConfigOrDie(nil)
-	res := dynamicClient.Resource(gvr)
+var _ = g.Describe("dynamic client is created inline, GVR is literate but using intermediate variables", func() {
+	g1 := "jk34.openshift.io"
+	g2 := g1
+	gr := g2
+	v := "v1"
+	r := "testdata"
+	g.It("L2 [apigroup:jk34.openshift.io]", func() {
+		res := dynamic.NewForConfigOrDie(nil).Resource(schema.GroupVersionResource{Group: gr, Version: v, Resource: r})
+		res.Get(context.TODO(), "test-123", metav1.GetOptions{})
+	})
+})
 
-	g.It("L2", func() {
+var _ = g.Describe("dynamic client is created inline, GVR is literate but using even more intermediate variables", func() {
+	g1 := "1ew3.openshift.io"
+	g2 := g1
+	g3 := g2
+	g4 := g3
+	g5 := g4
+	g6 := g5
+	g7 := g6
+	gr := g7
+	v := "v1"
+	r := "testdata"
+	g.It("L2 [apigroup:1ew3.openshift.io]", func() {
+		res := dynamic.NewForConfigOrDie(nil).Resource(schema.GroupVersionResource{Group: gr, Version: v, Resource: r})
+		res.Get(context.TODO(), "test-123", metav1.GetOptions{})
+	})
+})
+
+var _ = g.Describe("dynamic client is created inline, GVR is literate without field identifiers", func() {
+	g.It("L2 [apigroup:2b1f.openshift.io]", func() {
+		res := dynamic.NewForConfigOrDie(nil).Resource(schema.GroupVersionResource{"2b1f.openshift.io", "v1", "testdata"})
 		res.Get(context.TODO(), "test-123", metav1.GetOptions{})
 	})
 })
@@ -55,6 +78,34 @@ var _ = g.Describe("gvr is created as var just before creating dynamic interface
 	})
 })
 
+var _ = g.Describe("gvr is created on different level", func() {
+	gvr := schema.GroupVersionResource{Group: "40fd.openshift.io", Version: "v1", Resource: "testdata"}
+	g.It("L2 [apigroup:40fd.openshift.io]", func() {
+		dynamicClient := dynamic.NewForConfigOrDie(nil)
+		_ = dynamicClient.Resource(gvr)
+	})
+})
+
+var _ = g.Describe("dynamic client is created at Describe level [apigroup:3e90.openshift.io]", func() {
+	gvr := schema.GroupVersionResource{Group: "3e90.openshift.io", Version: "v1", Resource: "testdata"}
+	dynamicClient := dynamic.NewForConfigOrDie(nil)
+	res := dynamicClient.Resource(gvr)
+
+	g.It("L2", func() {
+		res.Get(context.TODO(), "test-123", metav1.GetOptions{})
+	})
+})
+
+var (
+	gvr = schema.GroupVersionResource{Group: "9080.openshift.io", Version: "v1", Resource: "testdata"}
+	_   = g.Describe("gvr is created on pkg level", func() {
+		g.It("L2 [apigroup:9080.openshift.io]", func() {
+			dynamicClient := dynamic.NewForConfigOrDie(nil)
+			_ = dynamicClient.Resource(gvr)
+		})
+	})
+)
+
 var _ = g.Describe("gvr var is passed to a function", func() {
 	g.It("L2 [apigroup:33a9.openshift.io]", func() {
 		gvr := schema.GroupVersionResource{Group: "33a9.openshift.io", Version: "v1", Resource: "testdata"}
@@ -72,24 +123,6 @@ func doStuffWithGVR(gvr schema.GroupVersionResource) {
 	dynamicClient := dynamic.NewForConfigOrDie(nil)
 	_ = dynamicClient.Resource(gvr)
 }
-
-var _ = g.Describe("gvr is created on different level", func() {
-	gvr := schema.GroupVersionResource{Group: "40fd.openshift.io", Version: "v1", Resource: "testdata"}
-	g.It("L2 [apigroup:40fd.openshift.io]", func() {
-		dynamicClient := dynamic.NewForConfigOrDie(nil)
-		_ = dynamicClient.Resource(gvr)
-	})
-})
-
-var (
-	gvr = schema.GroupVersionResource{Group: "9080.openshift.io", Version: "v1", Resource: "testdata"}
-	_   = g.Describe("gvr is created on pkg level", func() {
-		g.It("L2 [apigroup:9080.openshift.io]", func() {
-			dynamicClient := dynamic.NewForConfigOrDie(nil)
-			_ = dynamicClient.Resource(gvr)
-		})
-	})
-)
 
 var (
 	gvr2 = other_pkg.GVR("883a.openshift.io", "v1", "testdata")
@@ -116,10 +149,14 @@ var (
 	})
 )
 
+func localGVR(g, v, r string) schema.GroupVersionResource {
+	return schema.GroupVersionResource{Group: g, Version: v, Resource: r}
+}
+
 var (
 	gvrs2 = []schema.GroupVersionResource{
 		other_pkg.GVR("efd0.openshift.io", "v1", "testdata"),
-		other_pkg.GVR("08fa.openshift.io", "v1", "testdata"),
+		localGVR("08fa.openshift.io", "v1", "testdata"),
 	}
 	_ = g.Describe("gvr slice on package level created with helper func", func() {
 		g.It("L2 [apigroup:efd0.openshift.io][apigroup:08fa.openshift.io]", func() {
@@ -189,6 +226,26 @@ var (
 		})
 	})
 )
+
+var _ = g.Describe("gvr is 1st iter var from a map from another pkg which calls another func to create GVR", func() {
+	gvrs := other_pkg.GetMapGVRKeyFromFunc()
+	g.It("L2 [apigroup:a6d1.openshift.io]", func() {
+		dynamicClient := dynamic.NewForConfigOrDie(nil)
+		for gvr, _ := range gvrs {
+			_ = dynamicClient.Resource(gvr)
+		}
+	})
+})
+
+var _ = g.Describe("gvr is 1st iter var from a map from another pkg", func() {
+	gvrs := other_pkg.GetMapGVRKey()
+	g.It("L2 [apigroup:f832.openshift.io]", func() {
+		dynamicClient := dynamic.NewForConfigOrDie(nil)
+		for gvr, _ := range gvrs {
+			_ = dynamicClient.Resource(gvr)
+		}
+	})
+})
 
 var _ = g.Describe("gvr outside openshift.io should be ignored", func() {
 	g.It("L2", func() {
