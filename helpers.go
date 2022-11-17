@@ -17,6 +17,7 @@ func filter[T comparable](xs []T, pred func(T) bool) []T {
 	}
 	return xs2
 }
+
 func getIndex[T comparable](xs []T, pred func(T) bool) int {
 	for idx, x := range xs {
 		if pred(x) {

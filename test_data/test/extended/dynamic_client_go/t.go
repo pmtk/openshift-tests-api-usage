@@ -130,6 +130,26 @@ var (
 			}
 		})
 	})
+
+	_ = g.Describe("gvr is a slice from other func", func() {
+		g.It("[apigroup:jd9e.openshift.io][apigroup:9dk3.openshift.io]", func() {
+			_, gvrs := other_pkg.GetGVRS()
+			dynamicClient := dynamic.NewForConfigOrDie(nil)
+			for _, gvr := range gvrs {
+				_ = dynamicClient.Resource(gvr)
+			}
+		})
+	})
+
+	_ = g.Describe("gvr is a slice from other func", func() {
+		g.It("[apigroup:dj98.openshift.io][apigroup:dl39.openshift.io]", func() {
+			_, gvrs := other_pkg.GetGVRS2()
+			dynamicClient := dynamic.NewForConfigOrDie(nil)
+			for _, gvr := range gvrs {
+				_ = dynamicClient.Resource(gvr)
+			}
+		})
+	})
 )
 
 var (
@@ -139,8 +159,8 @@ var (
 		other_pkg.GVR("e4ad.openshift.io", "v1", "testdata"):              true,
 		other_pkg.GVR("73be.openshift.io", "v1", "testdata"):              true,
 	}
-	gvrMap2 = other_pkg.GetMapGVRKeyFromFunc()
-	gvrMap3 = other_pkg.GetMapGVRKey()
+	gvrMap2, _ = other_pkg.GetMapGVRKeyFromFunc()
+	gvrMap3    = other_pkg.GetMapGVRKey()
 
 	_ = g.Describe("gvr as map key on package level", func() {
 		g.It("map is created from literate structs [apigroup:105a.openshift.io][apigroup:57fb.openshift.io][apigroup:e4ad.openshift.io][apigroup:73be.openshift.io]", func() {
