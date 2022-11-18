@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
+	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/packages"
 	"strings"
@@ -44,17 +46,21 @@ func (i *investigator) assignStmt(a *ast.AssignStmt) []string {
 	// travel down to declaration
 	switch rhs := a.Rhs[0].(type) {
 	case *ast.Ident:
-		// g2 := g1
-		a2, ok := rhs.Obj.Decl.(*ast.AssignStmt)
-		assert(ok)
-		return i.assignStmt(a2)
+		switch decl := rhs.Obj.Decl.(type) {
+		case *ast.AssignStmt:
+			return i.assignStmt(decl)
+		case *ast.Field:
+			panic("TODO")
+		default:
+			panic("TODO")
+		}
 	case *ast.BasicLit:
 		// gr := "g"
 		return []string{sanitize(rhs.Value)}
 	case *ast.CompositeLit:
 		switch typ := rhs.Type.(type) {
 		case *ast.MapType:
-			isKeyGVR := isExprGVR(typ.Key)
+			isKeyGVR := i.isExprGVR(typ.Key)
 			groups := []string{}
 			for _, elt := range rhs.Elts {
 				elt := elt.(*ast.KeyValueExpr)
@@ -101,9 +107,31 @@ func (i *investigator) assignStmt(a *ast.AssignStmt) []string {
 					if ok {
 						return i.assignStmt(assignStmt)
 					}
+				default:
+					panic("TODO")
+				}
+			default:
+				panic("TODO")
+			}
+		case *ast.ArrayType:
+			groups := []string{}
+			for _, elt := range rhs.Elts {
+				switch elt := elt.(type) {
+				case *ast.CompositeLit:
+					// grvs := []GVR{ GVR{}, GVR{} }
+					//                ^^^^^ - created as literal struct
+					groups = append(groups, sanitize(elt.Elts[0].(*ast.KeyValueExpr).Value.(*ast.BasicLit).Value))
+				case *ast.CallExpr:
+					// grvs := []GVR{ funcReturningGVR(), funcReturningGVR() }
+					//                ^^^^^^^^^^^^^^^^^^ - GVR from function
+					groups = append(groups, i.analyzeCallExprReturningGVR(elt)...)
+				default:
+					panic("TODO")
 				}
 			}
-
+			return groups
+		default:
+			panic("TODO")
 		}
 
 	case *ast.UnaryExpr:
@@ -129,10 +157,16 @@ func (i *investigator) assignStmt(a *ast.AssignStmt) []string {
 						// grvs := []GVR{ funcReturningGVR(), funcReturningGVR() }
 						//                ^^^^^^^^^^^^^^^^^^ - GVR from function
 						groups = append(groups, i.analyzeCallExprReturningGVR(elt)...)
+					case *ast.KeyValueExpr:
+						groups = append(groups, i.analyzeKeyValueExpr(elt)...)
+					default:
+						panic("TODO")
 					}
 				}
 			case *ast.CallExpr:
 				return i.analyzeCallExprReturningGVR(value)
+			default:
+				panic("TODO")
 			}
 			return groups
 		case *ast.AssignStmt:
@@ -178,7 +212,7 @@ func isTypeGVR(t types.Type) bool {
 	return named.Obj().Type().String() == "k8s.io/apimachinery/pkg/runtime/schema.GroupVersionResource"
 }
 
-func isExprGVR(e ast.Expr) bool {
+func (i *investigator) isExprGVR(e ast.Expr) bool {
 	switch e := e.(type) {
 	case *ast.SelectorExpr:
 		return sanitize(e.Sel.Name) == "GroupVersionResource"
@@ -189,7 +223,7 @@ func isExprGVR(e ast.Expr) bool {
 		if as, ok := e.Obj.Decl.(*ast.AssignStmt); ok {
 			if len(as.Rhs) == 1 {
 				if cl, ok := as.Rhs[0].(*ast.CompositeLit); ok {
-					return isExprGVR(cl.Type)
+					return i.isExprGVR(cl.Type)
 				} else {
 					panic("TODO")
 				}
@@ -199,10 +233,33 @@ func isExprGVR(e ast.Expr) bool {
 		}
 		return false
 	case *ast.CompositeLit:
-		return isExprGVR(e.Type)
+		if e.Type == nil && len(e.Elts) == 3 {
+			return sanitize(e.Elts[0].(*ast.KeyValueExpr).Key.(*ast.Ident).Name) == "Group" &&
+				sanitize(e.Elts[1].(*ast.KeyValueExpr).Key.(*ast.Ident).Name) == "Version" &&
+				sanitize(e.Elts[2].(*ast.KeyValueExpr).Key.(*ast.Ident).Name) == "Resource"
+		}
+		return i.isExprGVR(e.Type)
+	case *ast.CallExpr:
+		if typ, ok := i.pkg.TypesInfo.Types[e]; ok {
+			return typ.Type.String() == "k8s.io/apimachinery/pkg/runtime/schema.GroupVersionResource"
+		}
+		panic("TODO")
+	case *ast.BasicLit:
+		switch e.Kind {
+		case token.IDENT,
+			token.INT,
+			token.FLOAT,
+			token.IMAG,
+			token.CHAR,
+			token.STRING:
+			return false
+		default:
+			panic("TODO")
+		}
+	default:
+		panic("TODO")
 	}
 
-	panic("TODO")
 	return false
 }
 
@@ -249,42 +306,58 @@ func (i *investigator) getFunctionFromImportedPackage(f *ast.SelectorExpr) (*pac
 	return nil, nil
 }
 
+func (i *investigator) analyzeKeyValueExpr(kv *ast.KeyValueExpr) []string {
+	// GVR{ Group: "g" ... }
+	if keyId, ok := kv.Key.(*ast.Ident); ok && sanitize(keyId.Name) == "Group" {
+		switch val := kv.Value.(type) {
+		case *ast.BasicLit:
+			return []string{sanitize(val.Value)}
+		default:
+			panic("TODO")
+		}
+	}
+
+	// map[GVR]*{ GVR: *, ... }
+	//            ^^^^^^ - need to extract GVR from that KV and analyze it
+	isKeyGVR := i.isExprGVR(kv.Key)
+	if isKeyGVR {
+		switch key := kv.Key.(type) {
+		case *ast.Ident:
+			return i.assignStmt(key.Obj.Decl.(*ast.AssignStmt))
+		case *ast.CallExpr:
+			return i.analyzeCallExprReturningGVR(key)
+		case *ast.CompositeLit:
+			return i.analyzeCompositeLit(key)
+		default:
+			panic("TODO")
+		}
+	} else {
+		switch val := kv.Value.(type) {
+		case *ast.Ident:
+			return i.assignStmt(val.Obj.Decl.(*ast.AssignStmt))
+		case *ast.CallExpr:
+			return i.analyzeCallExprReturningGVR(val)
+		case *ast.CompositeLit:
+			return i.analyzeCompositeLit(val)
+		default:
+			panic("TODO")
+		}
+	}
+
+	panic("TODO")
+	return nil
+}
+
 func (i *investigator) analyzeCompositeLit(m *ast.CompositeLit) []string {
 	groups := []string{}
 
 	for _, elt := range m.Elts {
 		switch elt := elt.(type) {
 		case *ast.KeyValueExpr:
-			isKeyGVR := isExprGVR(elt.Key)
-			if isKeyGVR {
-				switch key := elt.Key.(type) {
-				case *ast.Ident:
-					groups = append(groups, i.assignStmt(key.Obj.Decl.(*ast.AssignStmt))...)
-				case *ast.CallExpr:
-					groups = append(groups, i.analyzeCallExprReturningGVR(key)...)
-				case *ast.CompositeLit:
-					if id, ok := key.Elts[0].(*ast.KeyValueExpr).Key.(*ast.Ident); ok {
-						if sanitize(id.Name) == "Group" {
-							groups = append(groups, sanitize(key.Elts[0].(*ast.KeyValueExpr).Value.(*ast.BasicLit).Value))
-						} else {
-							panic("TODO")
-						}
-					} else {
-						groups = append(groups, i.analyzeCompositeLit(key)...)
-					}
-				default:
-					panic("TODO")
-				}
-			} else {
-				switch val := elt.Value.(type) {
-				case *ast.Ident:
-					groups = append(groups, i.assignStmt(val.Obj.Decl.(*ast.AssignStmt))...)
-				case *ast.CallExpr:
-					groups = append(groups, i.analyzeCallExprReturningGVR(val)...)
-				default:
-					panic("TODO")
-				}
-			}
+			return i.analyzeKeyValueExpr(elt)
+
+		default:
+			panic("TODO")
 		}
 	}
 	return groups
@@ -307,16 +380,16 @@ func (i *investigator) analyzeFunction(fun *ast.FuncDecl) []string {
 		case *ast.MapType:
 			switch returnedMap := returnStmt.Results[idx].(type) {
 			case *ast.CallExpr: // func returns func returning map
-				return i.analyzeFunction(returnedMap.Fun.(*ast.Ident).Obj.Decl.(*ast.FuncDecl))
+				groups = append(groups, i.analyzeFunction(returnedMap.Fun.(*ast.Ident).Obj.Decl.(*ast.FuncDecl))...)
 			case *ast.Ident:
-				return i.assignStmt(returnedMap.Obj.Decl.(*ast.AssignStmt))
+				groups = append(groups, i.assignStmt(returnedMap.Obj.Decl.(*ast.AssignStmt))...)
 			case *ast.CompositeLit:
 				groups = append(groups, i.analyzeCompositeLit(returnedMap)...)
 			default:
 				panic("todo")
 			}
 		case *ast.ArrayType:
-			isGVRArray := isExprGVR(typ.Elt)
+			isGVRArray := i.isExprGVR(typ.Elt)
 			if isGVRArray {
 				returnedGVRArr := returnStmt.Results[idx]
 				switch returnedGVRArr := returnedGVRArr.(type) {
@@ -335,12 +408,24 @@ func (i *investigator) analyzeFunction(fun *ast.FuncDecl) []string {
 							panic("todo")
 						}
 					}
+				case *ast.Ident:
+					groups = append(groups, i.assignStmt(returnedGVRArr.Obj.Decl.(*ast.AssignStmt))...)
+				default:
+					panic("TODO")
 				}
 			}
 		case *ast.CompositeLit:
 			panic("TODO")
 		case *ast.Ident:
-			continue
+			if typ.Obj == nil {
+				continue
+			}
+			switch decl := typ.Obj.Decl.(type) {
+			case *ast.AssignStmt:
+				groups = append(groups, i.assignStmt(decl)...)
+			default:
+				panic("TODO")
+			}
 		default:
 			panic("TODO")
 		}
@@ -368,6 +453,8 @@ func (i *investigator) analyzeCallExprReturningGVR(ce *ast.CallExpr) []string {
 						} else {
 							panic(nil)
 						}
+					default:
+						panic("TODO")
 					}
 				} else {
 					// not a "helper function F(g,v,r) GVR" but a function that returns GVR in some form like []GVR, map[GVR]* or map[*]GVR
@@ -397,11 +484,22 @@ func (i *investigator) analyzeCallExprReturningGVR(ce *ast.CallExpr) []string {
 						return []string{sanitize(arg.Value)}
 					case *ast.Ident:
 						// F( var, ... )
-						if as, ok := arg.Obj.Decl.(*ast.AssignStmt); ok {
-							return i.assignStmt(as)
-						} else {
-							panic(nil)
+						switch decl := arg.Obj.Decl.(type) {
+						case *ast.AssignStmt:
+							return i.assignStmt(decl)
+						case *ast.ValueSpec:
+							assert(len(decl.Values) == 1)
+							switch val := decl.Values[0].(type) {
+							case *ast.BasicLit:
+								return []string{sanitize(val.Value)}
+							default:
+								panic("TODO")
+							}
+						default:
+							panic("TODO")
 						}
+					default:
+						panic("TODO")
 					}
 
 				} else {
@@ -420,7 +518,8 @@ func (i *investigator) analyzeCallExprReturningGVR(ce *ast.CallExpr) []string {
 }
 
 type investigator struct {
-	pkg *packages.Package
+	pkg  *packages.Package
+	root *ast.File
 }
 
 // analyzeInterfaceResourceCall expects an *ast.CallExpr that is confirmed to be k8s.io/client-go/dynamic.Interface.Resource() call
@@ -448,15 +547,38 @@ func (i *investigator) analyzeInterfaceResourceCall(call *ast.CallExpr) []string
 				if ok {
 					return i.assignStmt(assignStmt)
 				}
+			default:
+				panic("TODO")
 			}
+		default:
+			panic("TODO")
 		}
 	case *ast.Ident:
 		// Resource(gvr) -- gvr has type GroupVersionResource
-		assignStmt, ok := v.Obj.Decl.(*ast.AssignStmt)
-		if ok {
-			return i.assignStmt(assignStmt)
+		switch decl := v.Obj.Decl.(type) {
+		case *ast.AssignStmt:
+			return i.assignStmt(decl)
+		case *ast.ValueSpec:
+			assert(len(decl.Values) == 1)
+			switch val := decl.Values[0].(type) {
+			case *ast.CompositeLit:
+				return i.analyzeCompositeLit(val)
+			case *ast.CallExpr:
+				return i.analyzeCallExprReturningGVR(val)
+			default:
+				panic("TODO")
+			}
+		case *ast.Field:
+			// function arg
+			// need to go up into caller and see all gvrs
+			path, _ := astutil.PathEnclosingInterval(i.root, decl.Pos(), decl.End())
+			// 0 - *ast.Field (decl), 1 - *ast.FieldList, 2 - *ast.FuncDecl
+			funcDecl := path[2].(*ast.FuncDecl)
+			_ = funcDecl
+			// TODO: find where function is used and then trace that gvr arg back to declaration
+		default:
+			panic("TODO")
 		}
-
 	default:
 		panic("TODO")
 	}
@@ -465,7 +587,6 @@ func (i *investigator) analyzeInterfaceResourceCall(call *ast.CallExpr) []string
 }
 
 func workOnAstPkg(pkg *packages.Package) {
-	inv := investigator{pkg}
 
 	i := inspector.New(pkg.Syntax)
 	i.WithStack(
@@ -478,8 +599,13 @@ func workOnAstPkg(pkg *packages.Package) {
 
 			callExpr := n.(*ast.CallExpr)
 			if checkIfResourceInterfaceCreation(callExpr) {
+				inv := investigator{pkg: pkg, root: stack[0].(*ast.File)}
+
 				fmt.Printf("ResourceInterface creation: %v\n", pkg.Fset.Position(n.Pos()))
 				fmt.Printf("\tAPI Groups:%v\n", inv.analyzeInterfaceResourceCall(callExpr))
+				if len(inv.analyzeInterfaceResourceCall(callExpr)) == 0 {
+					inv.analyzeInterfaceResourceCall(callExpr)
+				}
 			}
 			return
 		},

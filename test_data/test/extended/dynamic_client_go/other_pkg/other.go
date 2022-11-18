@@ -2,7 +2,9 @@
 
 package other_pkg
 
-import "k8s.io/apimachinery/pkg/runtime/schema"
+import (
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
 
 func GetGVRS() (int, []schema.GroupVersionResource) {
 	i := 0
@@ -46,5 +48,12 @@ func GetMapGVRKeyFromFunc() (map[schema.GroupVersionResource]bool, bool) {
 func GVR(g, v, r string) schema.GroupVersionResource {
 	return schema.GroupVersionResource{Group: g, Version: v, Resource: r}
 }
+
+// TODO
+//func DoStuffWithGVR(gvr schema.GroupVersionResource) {
+//	dynamicClient := dynamic.NewForConfigOrDie(nil)
+//	gvrIndirection := gvr
+//	_ = dynamicClient.Resource(gvrIndirection)
+//}
 
 // TODO: Function returning struct containing GVR

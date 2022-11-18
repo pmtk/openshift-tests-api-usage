@@ -79,6 +79,12 @@ var _ = g.Describe("ResourceInterface is created from DynamicConfig object, GVR 
 		gvr := schema.GroupVersionResource{Group: "33a9.openshift.io", Version: "v1", Resource: "testdata"}
 		doStuffWithGVR(gvr)
 	})
+
+	// TODO
+	//g.It("gvr var is passed to a function from another pkg [apigroup:3jd9.openshift.io]", func() {
+	//	gvr := schema.GroupVersionResource{Group: "3jd9.openshift.io", Version: "v1", Resource: "testdata"}
+	//	other_pkg.DoStuffWithGVR(gvr)
+	//})
 })
 
 var _ = g.Describe("dynamic client is created at Describe level [apigroup:3e90.openshift.io]", func() {
