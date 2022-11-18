@@ -225,3 +225,5 @@ func doStuffWithGVR(gvr schema.GroupVersionResource) {
 func localGVR(g, v, r string) schema.GroupVersionResource {
 	return schema.GroupVersionResource{Group: g, Version: v, Resource: r}
 }
+
+// TODO: origin/test/extended/templates/helpers.go +394 - very indirect, possibly runtime only
