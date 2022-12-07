@@ -30,6 +30,10 @@ Requires creation of both AST and SSA before hand. Takes significant time to com
 
 ## Roadmap/TODOs
 
+- Run against origin repository
+  - [ ] Create a list of tests
+  - [ ] Pick tests for which tool is producing expected output (compared with manual inspection) - this will be starting point of progress percentage
+  - [ ] Go test by test and improve the tool and increate the "coverage"
 - client-go
   - [ ] Create test data in `test_data/test/extended/client_go`
   - [ ] Create functionality to detect & interpret OpenShift's client-go usage
@@ -42,4 +46,3 @@ Requires creation of both AST and SSA before hand. Takes significant time to com
 - [CLI](https://github.com/openshift/origin/blob/master/test/extended/util/client.go)
   - [ ] Create test data in `test_data/test/extended/cli`
   - [ ] Create functionality to detect & interpret CLI usage
-
